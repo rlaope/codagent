@@ -1,3 +1,5 @@
+"""Tests for built-in contracts and Harness composer."""
+
 from codagent import AssumptionSurface, VerificationLoop, Harness
 
 
@@ -60,7 +62,7 @@ def test_verification_loop_validate_pass_with_honest_admission():
 
 
 def test_harness_wrap_messages_creates_system_when_absent():
-    h = Harness(AssumptionSurface(), VerificationLoop())
+    h = Harness.compose(AssumptionSurface(), VerificationLoop())
     messages = [{"role": "user", "content": "hi"}]
     wrapped = h.wrap_messages(messages)
     assert wrapped[0]["role"] == "system"
@@ -70,7 +72,7 @@ def test_harness_wrap_messages_creates_system_when_absent():
 
 
 def test_harness_wrap_messages_appends_to_existing_system():
-    h = Harness(AssumptionSurface())
+    h = Harness.compose(AssumptionSurface())
     messages = [
         {"role": "system", "content": "you are a helpful assistant"},
         {"role": "user", "content": "hi"},
@@ -83,7 +85,7 @@ def test_harness_wrap_messages_appends_to_existing_system():
 
 
 def test_harness_validate_aggregates():
-    h = Harness(AssumptionSurface(), VerificationLoop())
+    h = Harness.compose(AssumptionSurface(), VerificationLoop())
     response = (
         "Assumptions:\n- A\n- B\n\n"
         "Tests passed: $ npm test\n  ✓ ok"
@@ -92,3 +94,9 @@ def test_harness_validate_aggregates():
     assert out["all_ok"] is True
     assert out["AssumptionSurface"]["ok"] is True
     assert out["VerificationLoop"]["ok"] is True
+
+
+def test_compose_rejects_non_contract_non_source():
+    import pytest
+    with pytest.raises(TypeError):
+        Harness.compose("just a string")
