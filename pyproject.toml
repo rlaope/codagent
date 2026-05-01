@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codagent"
+version = "0.0.1"
+description = "Runtime behavior contracts for LLM-based code agents. Forces assumption surfacing and verification evidence at the LLM call site."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "rlaope" }]
+keywords = ["llm", "agents", "guardrails", "behavior-contracts", "claude", "openai", "anthropic", "langgraph"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = []
+
+[project.optional-dependencies]
+openai = ["openai>=1.0"]
+anthropic = ["anthropic>=0.30"]
+langgraph = ["langgraph>=0.2"]
+test = ["pytest>=8.0"]
+
+[project.urls]
+Homepage = "https://github.com/rlaope/codagent"
+Issues = "https://github.com/rlaope/codagent/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
