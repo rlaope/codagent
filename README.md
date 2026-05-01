@@ -2,147 +2,186 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
-**Apply any OSS LLM-harness to your code-agent runtime.**
+**Plug-in harness system for agentic frameworks.**
 
-`codagent` is the adapter layer between the **harness ecosystem**
-(CLAUDE.md / AGENTS.md / `.cursor/rules` / `.windsurfrules` / Guardrails.ai
-validators / NeMo Colang flows / custom team conventions) and the
-**code-agent runtimes** (Claude Code, Cursor, GitHub Copilot, Codex CLI,
-OpenAI / Anthropic clients).
+`codagent` is a small library that lets you bolt **behavioral contracts**
+and **domain-agent supervisors** onto LLM-based applications built on
+LangChain, LangGraph, CrewAI, AutoGen, or raw OpenAI/Anthropic clients.
 
-It is **not itself a harness**. It is the layer that lets you take
-harnesses written by other people, in other formats, and apply them
-uniformly to whatever code agent your team uses.
+The harnesses themselves are pluggable — markdown rule sets, Guardrails.ai
+validators, NeMo Colang flows, custom team conventions, or **meta-agents
+that supervise other agents** (e.g. a finance-compliance reviewer
+watching a financial-advice chatbot).
 
-> Think of it as **ESLint for agent harnesses** — many rule providers,
-> one engine, one config.
+> Not a coding-agent gude. This is for people **building** agents.
 
 ## Why this exists
 
-The 2025-2026 OSS ecosystem has many LLM-behavior rule sets:
+Most teams building agents end up writing the same kinds of behavioral
+glue over and over:
 
-- Markdown gudes: `forrestchang/andrej-karpathy-skills`,
-  `rlaope/quoted-andrej-karpathy`, custom team CLAUDE.md files
-- Validator libraries: Guardrails.ai, NVIDIA NeMo Guardrails
-- Constitutional AI principles, audit checklists, scope contracts
+- "Before calling a tool, the agent should declare why" (tool-use)
+- "When the user asks for medical advice, refuse with this template"
+  (conversational compliance)
+- "Every factual claim in the response must carry a citation" (research)
+- "A supervisor agent should review every response for SEC compliance"
+  (meta-agent)
 
-But they all live in different formats, and code agents (Claude Code,
-Cursor, Copilot, Aider, Codex) each read different files. Today there
-is no clean way to:
-
-1. **Compose** rules from multiple sources
-2. **Apply** them uniformly across all code agents
-3. **Switch** between rule sources without rewriting your project
-
-`codagent` solves all three.
+These rules already exist scattered across the OSS ecosystem (markdown
+gudes, Guardrails.ai, NeMo, internal docs). `codagent` provides a thin
+adapter layer so you can compose them and apply them uniformly to your
+agentic framework.
 
 ## Install
 
 ```bash
-pip install codagent
+pip install git+https://github.com/rlaope/codagent.git
 ```
 
-Optional integrations (install only what you need):
+Optional integrations:
 
 ```bash
+pip install codagent[langchain]      # LangChain callback handler + Runnable
 pip install codagent[openai]         # OpenAI client wrapper
 pip install codagent[anthropic]      # Anthropic client wrapper (planned)
-pip install codagent[langgraph]      # LangGraph node factories
 pip install codagent[guardrails-ai]  # wrap Guardrails.ai validators
 pip install codagent[nemo]           # wrap NeMo Guardrails flows
 ```
 
-## Quick start — Python
+## Quick start — agentic framework builder
+
+### LangGraph customer-support agent
 
 ```python
-from codagent import Harness
-from codagent.adapters import from_markdown
-from codagent.targets import apply_to_claude_code, apply_to_cursor, apply_to_copilot
+from codagent import Harness, RefusalPattern, ToolCallSurface
+from codagent.langgraph_nodes import assumption_surface_node, verification_gate
 
-# Compose a harness from multiple sources
 harness = Harness.compose(
-    from_markdown("rlaope/quoted-andrej-karpathy"),                  # GitHub shortcut
-    from_markdown("forrestchang/andrej-karpathy-skills"),            # GitHub shortcut
-    from_markdown("./team/CONVENTIONS.md"),                          # local file
+    RefusalPattern(sensitive_keywords=("legal-advice", "medical-advice")),
+    ToolCallSurface(),
 )
 
-# Apply to all the code-agent runtimes your team uses
-harness.apply(apply_to_claude_code(project_root="./my-app"))
-harness.apply(apply_to_cursor(project_root="./my-app"))
-harness.apply(apply_to_copilot(project_root="./my-app"))
+graph.add_node("clarify", assumption_surface_node(my_llm))
+graph.add_conditional_edges(
+    "execute", verification_gate, {"verified": "done", "missing": "retry"}
+)
 ```
 
-## Quick start — CLI
+### LangChain chain wrapping
 
-```bash
-codagent install \
-  --from rlaope/quoted-andrej-karpathy \
-  --from forrestchang/andrej-karpathy-skills \
-  --to claude-code \
-  --to cursor \
-  --to copilot \
-  --to agents-md \
-  --project ./my-app \
-  --mode append
+```python
+from langchain_openai import ChatOpenAI
+from codagent import Harness, AssumptionSurface, VerificationLoop
+from codagent.langchain_integration import HarnessRunnable
+
+chain = HarnessRunnable(
+    Harness.compose(AssumptionSurface(), VerificationLoop()),
+    ChatOpenAI(model="gpt-4o"),
+)
+chain.invoke([{"role": "user", "content": "Should we refund this customer?"}])
 ```
 
-Sources accept:
-- GitHub shortcut: `owner/repo` (defaults to `main/CLAUDE.md`)
-- GitHub with path: `owner/repo:AGENTS.md`
-- HTTPS URL
-- Local file path
+### Domain agent injected as harness (meta-agent)
 
-Targets: `claude-code`, `cursor`, `copilot`, `agents-md`.
-Modes: `replace` (default, with `.bak` backup) or `append`.
+```python
+from anthropic import Anthropic
+from codagent import Harness, MetaAgentContract
+
+claude = Anthropic()
+
+def finance_judge(prompt: str) -> str:
+    msg = claude.messages.create(
+        model="claude-opus-4-5",
+        max_tokens=200,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return msg.content[0].text
+
+finance_supervisor = MetaAgentContract(
+    name="finance-compliance",
+    judge_callable=finance_judge,
+    judge_prompt_template=(
+        "Check whether the response includes the required disclaimer.\n\n"
+        "RESPONSE: {response}\n\n"
+        "Reply with COMPLIANT or NON-compliant."
+    ),
+    system_addendum_text=(
+        "When discussing investments, always include the disclaimer "
+        "'This is not financial advice.'"
+    ),
+)
+
+harness = Harness.compose(finance_supervisor)
+result = harness.validate(model_response_text)
+# {'finance-compliance': {'ok': True/False, ...}, 'all_ok': ...}
+```
 
 ## Built-in contracts
 
-Two reference Karpathy-derived contracts ship in `codagent.builtin`:
+| Contract | Use for | Forces |
+|---|---|---|
+| `AssumptionSurface` | any agent | leading `Assumptions:` block when request is ambiguous |
+| `VerificationLoop` | task-completion agents | evidence (test/output) before declaring done |
+| `ToolCallSurface` | tool-use / function-calling agents | explicit `ToolCall:` block before tool invocation |
+| `RefusalPattern` | conversational agents | structured `Refusal:` block for sensitive requests |
+| `CitationRequired` | research / legal / medical agents | `[source: ...]` markers on factual claims |
+| `MetaAgentContract` | any agent needing nuanced policy | LLM-as-judge validation by a supervisor agent |
 
-- **`AssumptionSurface`** — forces the agent to prepend an
-  `Assumptions:` block when the user request is ambiguous.
-- **`VerificationLoop`** — forces the agent to attach evidence
-  (test/output/diff) before any "done" claim. Bans phrases like
-  "should work" / "looks correct".
-
-You can use them on their own, compose them with imported sources, or
-ignore them entirely and bring your own.
+Compose them freely:
 
 ```python
-from codagent import AssumptionSurface, VerificationLoop, Harness
-from codagent.targets import wrap_openai
-from openai import OpenAI
+from codagent import Harness, AssumptionSurface, ToolCallSurface, RefusalPattern
 
-client = wrap_openai(OpenAI(), AssumptionSurface(min_items=2), VerificationLoop())
-client.chat.completions.create(model="gpt-4o", messages=[...])
+domain_harness = Harness.compose(
+    AssumptionSurface(min_items=2),
+    ToolCallSurface(),
+    RefusalPattern(sensitive_keywords=("share my password", "ssn")),
+)
 ```
 
 ## Architecture
 
-```
-HarnessSource (input)         ApplyTarget (output)
-─────────────────────         ─────────────────────
-from_markdown                 apply_to_claude_code
-from_guardrails_ai            apply_to_cursor
-from_nemo                     apply_to_copilot
-custom Contract               apply_to_agents_md
-                              wrap_openai
+Three orthogonal axes:
 
-           \         /
-            Harness (compose, validate, apply)
+```
+Sources of harnesses     Behavior primitives    Application targets
+─────────────────────    ──────────────────     ───────────────────
+HarnessSource            Contract                ApplyTarget
+  from_markdown            AssumptionSurface       LangChain callback
+  from_guardrails_ai       VerificationLoop        LangGraph node
+  from_nemo                ToolCallSurface         OpenAI wrap
+  custom adapter           RefusalPattern          (file targets, bonus)
+                           CitationRequired
+                           MetaAgentContract
+                           your custom Contract
+
+                            \    /
+                             Harness (compose, validate, apply)
 ```
 
-Add a new source: subclass `HarnessSource`, return a list of
-`Contract`. Add a new target: subclass `ApplyTarget`, write the
-contracts wherever your runtime expects them. PRs welcome.
+Add your own contract: subclass `Contract`, implement `system_addendum`
+and `validate`. Add your own harness source: subclass `HarnessSource`,
+return contracts. PRs welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md).
+
+## Bonus: also works as a coding-agent gude installer
+
+`codagent` also ships a CLI that writes harness rule sets into the
+locations coding agents read (Claude Code, Cursor, Copilot, Codex):
+
+```bash
+codagent install \
+  --from forrestchang/andrej-karpathy-skills \
+  --to claude-code --to cursor --to copilot --to agents-md \
+  --project ./my-app
+```
+
+This is a side feature — the main library is for agentic framework builders.
 
 ## Status
 
-`v0.1.0` alpha. Core abstracts (Contract / HarnessSource /
-ApplyTarget / Harness) are stable in spirit. Adapters and targets
-expand over time.
+`v0.2.0` alpha. Core abstracts (Contract / HarnessSource / ApplyTarget)
+are stable in spirit. Adapters and contract types continue to expand.
 
 ## License
 
-MIT — see [LICENSE](./LICENSE). Inspired by, and links to, the
-upstream Karpathy-derived rule sets cited in `LICENSE`.
+MIT — see [LICENSE](./LICENSE). Karpathy-derived ideas attributed there.
