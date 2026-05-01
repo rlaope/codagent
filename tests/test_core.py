@@ -47,6 +47,13 @@ def test_verification_loop_validate_pass_test_output():
     assert ok
 
 
+def test_verification_loop_validate_pass_pytest_passed():
+    v = VerificationLoop()
+    response = "Done. pytest passed."
+    ok, _ = v.validate(response)
+    assert ok, "evidence regex should match common 'pytest passed' phrasing"
+
+
 def test_verification_loop_validate_fail_unbacked():
     v = VerificationLoop()
     ok, msg = v.validate("Should work now.")

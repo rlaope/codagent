@@ -40,6 +40,13 @@ hundreds of repos. `codagent` packages them once.
 pip install git+https://github.com/rlaope/codagent.git
 ```
 
+> **Python 3.14 note.** Editable installs (`pip install -e`) currently
+> fail to import on Python 3.14 because setuptools writes
+> `__editable__.codagent-*.pth`, and 3.14 skips `.pth` files whose name
+> starts with `_` as hidden. Use a regular install (`pip install
+> /path/to/codagent`) on 3.14, or stay on Python 3.13 / 3.12 for
+> editable workflows. Tracked at upstream pypa/setuptools.
+
 Optional integrations (install only what your stack needs):
 
 ```bash

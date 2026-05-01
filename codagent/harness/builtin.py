@@ -31,7 +31,7 @@ _ASSUMPTION_ITEM_RE = re.compile(r"(?m)^\s*[-*]\s+\S")
 
 _EVIDENCE_RE = re.compile(
     r"(?im)("
-    r"\btest(?:s)?\s+passed\b|"
+    r"\b(?:py)?test(?:s)?\s+passed\b|"
     r"\ball\s+tests?\s+pass\b|"
     r"^\s*\$\s+\S+|"
     r"\bexit\s+code\s+0\b|"

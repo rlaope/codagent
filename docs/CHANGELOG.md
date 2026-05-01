@@ -2,7 +2,25 @@
 
 Version history for codagent.
 
-## v0.4.0 (current)
+## v0.4.1 (current)
+
+**Patch — discovered while dogfooding via codagent-rag-demo.**
+
+### Fixed
+
+- `VerificationLoop`: evidence regex now also matches `pytest passed`
+  (the previous `\btest(?:s)?\s+passed\b` pattern was blocked by the
+  word boundary inside `pytest`). Pattern is now
+  `\b(?:py)?test(?:s)?\s+passed\b`.
+
+### Documented
+
+- README install section: noted Python 3.14 incompatibility with
+  setuptools editable installs (`__editable__.*.pth` files are skipped
+  on 3.14 because their names start with `_`). Recommend a non-editable
+  install or Python 3.13 / 3.12 for editable workflows.
+
+## v0.4.0
 
 **Alpha release**
 
