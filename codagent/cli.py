@@ -23,12 +23,12 @@ from __future__ import annotations
 import argparse
 import sys
 
-from codagent._harness import Harness
-from codagent.adapters.markdown import from_markdown
-from codagent.targets.agents_md import apply_to_agents_md
-from codagent.targets.claude_code import apply_to_claude_code
-from codagent.targets.copilot import apply_to_copilot
-from codagent.targets.cursor import apply_to_cursor
+from codagent.harness._harness import Harness
+from codagent.harness.adapters.markdown import from_markdown
+from codagent.harness.targets.agents_md import apply_to_agents_md
+from codagent.harness.targets.claude_code import apply_to_claude_code
+from codagent.harness.targets.copilot import apply_to_copilot
+from codagent.harness.targets.cursor import apply_to_cursor
 
 
 _TARGET_REGISTRY = {
