@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codagent"
-version = "0.2.0"
-description = "Plug-in harness system for agentic frameworks (LangChain, LangGraph, CrewAI, OpenAI, Anthropic). Compose behavior contracts (assumption surfacing, verification, tool-use intent, refusal patterns, meta-agent supervisors) and apply them at the LLM call site."
+version = "0.4.0"
+description = "Production utilities for Python LLM agents — node wrappers (retry/timeout/cache), tool decorators (validate/circuit/rate-limit), observability (cost/step/trace), behavior contracts. Works with LangGraph, LangChain, LlamaIndex, CrewAI, AutoGen, DSPy, Pydantic AI, OpenAI, Anthropic."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -33,6 +33,11 @@ openai = ["openai>=1.0"]
 anthropic = ["anthropic>=0.30"]
 langchain = ["langchain-core>=0.2"]
 langgraph = ["langgraph>=0.2"]
+llamaindex = ["llama-index-core>=0.11"]
+pydantic-ai = ["pydantic-ai>=0.0.1"]
+crewai = ["crewai>=0.1"]
+autogen = ["pyautogen>=0.2"]
+dspy = ["dspy-ai>=2.5"]
 guardrails-ai = ["guardrails-ai>=0.5"]
 nemo = ["nemoguardrails>=0.10"]
 test = ["pytest>=8.0"]
