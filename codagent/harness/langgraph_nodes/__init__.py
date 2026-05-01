@@ -14,7 +14,7 @@ is in `codagent.builtin`.
 
 from __future__ import annotations
 
-from codagent.builtin import AssumptionSurface, VerificationLoop
+from codagent.harness.builtin import AssumptionSurface, VerificationLoop
 
 
 def assumption_surface_node(llm, *, min_items: int = 1):

@@ -19,7 +19,7 @@ import re
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from codagent._abc import Contract, HarnessSource
+from codagent.harness._abc import Contract, HarnessSource
 
 
 _GH_SHORT_RE = re.compile(r"^([\w.-]+)/([\w.-]+)(?::(.+))?$")

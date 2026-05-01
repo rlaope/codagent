@@ -11,7 +11,7 @@ validator's intent; the validator runs as the codagent validate().
 
 from __future__ import annotations
 
-from codagent._abc import Contract, HarnessSource
+from codagent.harness._abc import Contract, HarnessSource
 
 
 class _GuardrailsContract(Contract):

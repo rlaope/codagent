@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from codagent._abc import ApplyTarget, Contract
+from codagent.harness._abc import ApplyTarget, Contract
 
 
 class _FileApplyTarget(ApplyTarget):

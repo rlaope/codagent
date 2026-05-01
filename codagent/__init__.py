@@ -1,40 +1,40 @@
-"""codagent — plug-in harness system for agentic frameworks.
+"""codagent — production utilities for LangGraph agent applications.
 
-codagent makes it trivial to add behavioral contracts and domain-agent
-supervisors to LLM-based applications built on LangChain, LangGraph,
-CrewAI, AutoGen, or raw OpenAI/Anthropic clients.
+Modules:
 
-Three orthogonal axes:
+    codagent.nodes          node wrappers (retry, timeout, cache, structured)
+    codagent.tools          tool decorators (validated, circuit, rate_limit)
+    codagent.observability  cost / step / trace primitives
+    codagent.harness        behavior contracts (assumption surface,
+                            verification, refusal, meta-agent, ...)
 
-    Sources of harnesses:    HarnessSource (markdown, Guardrails.ai, NeMo, ...)
-    Behavioral primitives:   Contract (the rule itself)
-    Application targets:     ApplyTarget (where the rule lives at runtime)
-
-The same Contract object can power:
-    - LangChain callback handler  (HarnessCallbackHandler)
-    - LangGraph node              (assumption_surface_node, verification_gate)
-    - OpenAI / Anthropic wrap     (wrap_openai)
-    - File output                 (apply_to_claude_code, apply_to_cursor, ...)
-
-Built-in contracts (codagent.builtin):
-    AssumptionSurface, VerificationLoop  — Karpathy core
-    ToolCallSurface                      — tool-use agents
-    RefusalPattern, CitationRequired     — domain compliance
-    MetaAgentContract                    — domain agent as harness
+The harness module is the original codagent surface; everything that
+used to be importable as ``from codagent import X`` lives now under
+``codagent.harness.X``. Re-exports at this top level remain for one
+minor cycle with a DeprecationWarning.
 """
 
-from codagent._abc import ApplyTarget, Contract, HarnessSource
-from codagent._harness import Harness
-from codagent.builtin import (
+from __future__ import annotations
+
+import warnings as _warnings
+
+# Public re-export: harness API still importable from codagent.* with a warning.
+from codagent.harness import (
+    ApplyTarget,
     AssumptionSurface,
     CitationRequired,
+    Contract,
+    Harness,
+    HarnessSource,
     MetaAgentContract,
     RefusalPattern,
     ToolCallSurface,
     VerificationLoop,
 )
 
+
 __all__ = [
+    # Re-exported from codagent.harness for one deprecation cycle.
     "ApplyTarget",
     "AssumptionSurface",
     "CitationRequired",
@@ -46,4 +46,4 @@ __all__ = [
     "ToolCallSurface",
     "VerificationLoop",
 ]
-__version__ = "0.2.0"
+__version__ = "0.3.0"

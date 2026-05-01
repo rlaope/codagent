@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from codagent._abc import ApplyTarget, Contract, HarnessSource
+from codagent.harness._abc import ApplyTarget, Contract, HarnessSource
 
 
 class Harness:

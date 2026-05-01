@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from codagent._harness import Harness
+from codagent.harness._harness import Harness
 
 
 def make_harness_callback_handler(harness: Harness):

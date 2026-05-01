@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from codagent.targets._file_target import _FileApplyTarget
+from codagent.harness.targets._file_target import _FileApplyTarget
 
 
 class apply_to_agents_md(_FileApplyTarget):

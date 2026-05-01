@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable
 
-from codagent._abc import Contract
+from codagent.harness._abc import Contract
 
 
 # -- Karpathy core ----------------------------------------------------------

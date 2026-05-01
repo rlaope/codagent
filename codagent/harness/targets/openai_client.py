@@ -7,7 +7,7 @@ into every messages array.
 
 from __future__ import annotations
 
-from codagent._abc import ApplyTarget, Contract
+from codagent.harness._abc import ApplyTarget, Contract
 
 
 def wrap_openai(client, *contracts):
@@ -16,12 +16,12 @@ def wrap_openai(client, *contracts):
     Usage:
         from openai import OpenAI
         from codagent import AssumptionSurface, VerificationLoop
-        from codagent.targets import wrap_openai
+        from codagent.harness.targets import wrap_openai
 
         client = wrap_openai(OpenAI(), AssumptionSurface(), VerificationLoop())
         client.chat.completions.create(model="gpt-4o", messages=[...])
     """
-    from codagent._harness import Harness
+    from codagent.harness._harness import Harness
 
     harness = Harness(list(contracts))
     chat = getattr(client, "chat", None)
