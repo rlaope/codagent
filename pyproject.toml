@@ -4,17 +4,26 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codagent"
-version = "0.0.1"
-description = "Runtime behavior contracts for LLM-based code agents. Forces assumption surfacing and verification evidence at the LLM call site."
+version = "0.1.0"
+description = "Apply OSS LLM-harness rule sets (CLAUDE.md, AGENTS.md, .cursor/rules, NeMo, Guardrails.ai, ...) to code-agent runtimes (Claude Code, Cursor, Copilot, OpenAI/Anthropic clients)."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "rlaope" }]
-keywords = ["llm", "agents", "guardrails", "behavior-contracts", "claude", "openai", "anthropic", "langgraph"]
+keywords = [
+    "llm", "agents", "guardrails", "behavior-contracts",
+    "claude-code", "cursor", "copilot", "openai", "anthropic",
+    "langgraph", "langchain", "harness", "karpathy",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = []
@@ -23,11 +32,17 @@ dependencies = []
 openai = ["openai>=1.0"]
 anthropic = ["anthropic>=0.30"]
 langgraph = ["langgraph>=0.2"]
+guardrails-ai = ["guardrails-ai>=0.5"]
+nemo = ["nemoguardrails>=0.10"]
 test = ["pytest>=8.0"]
+
+[project.scripts]
+codagent = "codagent.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/rlaope/codagent"
 Issues = "https://github.com/rlaope/codagent/issues"
+Repository = "https://github.com/rlaope/codagent"
 
 [tool.setuptools.packages.find]
 where = ["src"]
