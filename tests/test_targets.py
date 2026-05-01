@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from codagent import AssumptionSurface, Harness, VerificationLoop
-from codagent.targets import (
+from codagent.harness.targets import (
     apply_to_agents_md,
     apply_to_claude_code,
     apply_to_copilot,

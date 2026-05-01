@@ -23,7 +23,7 @@ def test_callback_handler_factory_raises_without_langchain(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
-    from codagent.langchain_integration import make_harness_callback_handler
+    from codagent.harness.langchain_integration import make_harness_callback_handler
 
     h = Harness.compose(AssumptionSurface())
     with pytest.raises(ImportError) as ei:
@@ -33,7 +33,7 @@ def test_callback_handler_factory_raises_without_langchain(monkeypatch):
 
 def test_harness_runnable_wraps_messages_and_delegates():
     """HarnessRunnable should rewrite list-of-dicts inputs and forward."""
-    from codagent.langchain_integration import HarnessRunnable
+    from codagent.harness.langchain_integration import HarnessRunnable
 
     captured = {}
 
@@ -53,7 +53,7 @@ def test_harness_runnable_wraps_messages_and_delegates():
 
 
 def test_harness_runnable_passes_through_non_message_inputs():
-    from codagent.langchain_integration import HarnessRunnable
+    from codagent.harness.langchain_integration import HarnessRunnable
 
     class FakeRunnable:
         def invoke(self, x, config=None):

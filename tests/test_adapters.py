@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from codagent import Harness
-from codagent.adapters import from_markdown
+from codagent.harness.adapters import from_markdown
 
 
 def test_from_markdown_local_file(tmp_path):
