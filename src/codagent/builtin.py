@@ -1,15 +1,16 @@
-"""Core primitives.
+"""Built-in Karpathy-derived contracts.
 
-Each primitive contributes (a) a system-prompt addendum that shapes
-agent behavior at the LLM call site and (b) a validator that checks
-whether a response complied. Compose them with `Harness`.
+These are reference implementations of the Contract abstract — useful
+on their own and as examples for how to build custom contracts. The
+runtime contract pattern is more important than these specific rules.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Iterable
+
+from codagent._abc import Contract
 
 
 _ASSUMPTION_HEADING_RE = re.compile(r"(?im)^\s*[*#]*\s*Assumptions?\b\s*[:\s]")
@@ -33,15 +34,11 @@ _UNBACKED_RE = re.compile(
 
 
 @dataclass
-class AssumptionSurface:
-    """Force the agent to surface its assumptions before acting.
-
-    When the user request leaves any decision unspecified (scope,
-    format, scale, edge cases), the agent must lead with an
-    `Assumptions:` block listing decisions in declarative form.
-    """
+class AssumptionSurface(Contract):
+    """Force the agent to surface its assumptions before acting."""
 
     min_items: int = 1
+    name: str = "AssumptionSurface"
 
     def system_addendum(self) -> str:
         return (
@@ -61,23 +58,17 @@ class AssumptionSurface:
     def validate(self, response: str) -> tuple[bool, str]:
         if not _ASSUMPTION_HEADING_RE.search(response):
             return False, "no `Assumptions:` heading found"
-        # Crude heuristic: count bullet items anywhere in response.
         items = len(_ASSUMPTION_ITEM_RE.findall(response))
         if items < self.min_items:
-            return False, (
-                f"found {items} bullet items, need at least {self.min_items}"
-            )
+            return False, f"found {items} bullet items, need at least {self.min_items}"
         return True, ""
 
 
 @dataclass
-class VerificationLoop:
-    """Force the agent to back any "done" claim with evidence.
+class VerificationLoop(Contract):
+    """Force the agent to back any 'done' claim with evidence."""
 
-    Evidence accepted: passing test, command output, or a diff that
-    visibly satisfies the success criteria. Disallowed: phrases like
-    "should work", "looks correct", "I believe".
-    """
+    name: str = "VerificationLoop"
 
     def system_addendum(self) -> str:
         return (
@@ -99,39 +90,3 @@ class VerificationLoop:
         if not _EVIDENCE_RE.search(response) and "i have not verified" not in response.lower():
             return False, "no evidence markers and no honest 'not verified' note"
         return True, ""
-
-
-class Harness:
-    """Compose multiple contracts into a single addendum + validator."""
-
-    def __init__(self, *contracts):
-        self.contracts = list(contracts)
-
-    def system_addendum(self) -> str:
-        parts = [c.system_addendum() for c in self.contracts]
-        return "\n\n".join(p for p in parts if p)
-
-    def wrap_messages(self, messages: list[dict]) -> list[dict]:
-        addendum = self.system_addendum()
-        if not addendum:
-            return list(messages)
-        if messages and messages[0].get("role") == "system":
-            head = messages[0]
-            new_head = {
-                "role": "system",
-                "content": (head.get("content") or "") + "\n\n" + addendum,
-            }
-            return [new_head, *messages[1:]]
-        return [{"role": "system", "content": addendum}, *messages]
-
-    def validate(self, response: str) -> dict:
-        results = {}
-        all_ok = True
-        for c in self.contracts:
-            name = type(c).__name__
-            ok, msg = c.validate(response)
-            results[name] = {"ok": ok, "reason": msg}
-            if not ok:
-                all_ok = False
-        results["all_ok"] = all_ok
-        return results
