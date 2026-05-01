@@ -2,35 +2,32 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
-**Plug-in harness system for agentic frameworks.**
+**Production utilities for LangGraph agent applications.**
 
-`codagent` is a small library that lets you bolt **behavioral contracts**
-and **domain-agent supervisors** onto LLM-based applications built on
-LangChain, LangGraph, CrewAI, AutoGen, or raw OpenAI/Anthropic clients.
+`codagent` is a small library of composable wrappers, decorators, and
+primitives that LangGraph product teams currently hand-roll: retry /
+timeout / cache wrappers around nodes, validation / circuit-breaker /
+rate-limit decorators around tools, cost & step tracking, plus a
+behavior-contract module for assumption-surfacing, refusals, and
+LLM-as-judge supervision.
 
-The harnesses themselves are pluggable — markdown rule sets, Guardrails.ai
-validators, NeMo Colang flows, custom team conventions, or **meta-agents
-that supervise other agents** (e.g. a finance-compliance reviewer
-watching a financial-advice chatbot).
-
-> Not a coding-agent gude. This is for people **building** agents.
+> Lodash for LangGraph product development.
 
 ## Why this exists
 
-Most teams building agents end up writing the same kinds of behavioral
-glue over and over:
+The LangGraph ecosystem (late 2025 / early 2026) has frameworks
+(`langgraph-agent-toolkit`) and scaffolds (`langgraph-starter-kit`),
+but **no library that ships small composable utility primitives**:
 
-- "Before calling a tool, the agent should declare why" (tool-use)
-- "When the user asks for medical advice, refuse with this template"
-  (conversational compliance)
-- "Every factual claim in the response must carry a citation" (research)
-- "A supervisor agent should review every response for SEC compliance"
-  (meta-agent)
+- LangGraph's native `retry_policy` silently drops some exceptions
+  ([#6027](https://github.com/langchain-ai/langgraph/issues/6027))
+- No tool circuit breaker / rate limiter as packages
+- No cost-budget guard primitive
+- No state-reducer library beyond `operator.add`
+- `langgraph-supervisor` is soft-deprecated
 
-These rules already exist scattered across the OSS ecosystem (markdown
-gudes, Guardrails.ai, NeMo, internal docs). `codagent` provides a thin
-adapter layer so you can compose them and apply them uniformly to your
-agentic framework.
+Every team running production LangGraph agents writes the same glue.
+`codagent` packages it.
 
 ## Install
 
@@ -48,139 +45,140 @@ pip install codagent[guardrails-ai]  # wrap Guardrails.ai validators
 pip install codagent[nemo]           # wrap NeMo Guardrails flows
 ```
 
-## Quick start — agentic framework builder
+## What's in v0.3.0
 
-### LangGraph customer-support agent
+```
+codagent/
+├── nodes/              # composable node wrappers
+│   ├── with_retry      # retry on listed exception types with backoff
+│   ├── with_timeout    # cross-platform wall-clock timeout
+│   ├── with_cache      # LRU cache with custom key_fn + TTL
+│   └── parse_structured  # parse output through any validator
+│
+├── tools/              # tool callable hardening
+│   ├── validated_tool  # kwargs validation before invocation
+│   ├── circuit_breaker # 3-state breaker with cooldown
+│   └── rate_limit      # sliding-window rate limit
+│
+├── observability/      # production tracking
+│   ├── CostTracker     # token & USD accumulator (OpenAI/Anthropic price table)
+│   ├── StepBudget      # raises BudgetExceeded after max_steps
+│   └── StateTracer     # before/after state shape + duration per node
+│
+└── harness/            # behavior contracts (former codagent core)
+    ├── AssumptionSurface, VerificationLoop, ToolCallSurface
+    ├── RefusalPattern, CitationRequired
+    └── MetaAgentContract  # LLM-as-judge for nuanced compliance
+```
+
+## Quick start — node wrappers
 
 ```python
-from codagent import Harness, RefusalPattern, ToolCallSurface
-from codagent.langgraph_nodes import assumption_surface_node, verification_gate
+from codagent.nodes import with_retry, with_timeout, with_cache
+
+# Stack wrappers freely
+node = with_timeout(
+    with_retry(
+        with_cache(my_llm_node, key_fn=lambda s: s["query"], ttl=300),
+        attempts=3,
+        on=(ConnectionError, TimeoutError),
+    ),
+    seconds=30,
+)
+
+graph.add_node("step", node)
+```
+
+## Quick start — tool hardening
+
+```python
+from codagent.tools import validated_tool, circuit_breaker, rate_limit
+from pydantic import BaseModel
+
+class SearchArgs(BaseModel):
+    query: str
+    limit: int = 10
+
+@validated_tool(lambda kw: SearchArgs(**kw).model_dump())
+@circuit_breaker(failure_threshold=5, reset_after=60)
+@rate_limit(per_second=10)
+def search_db(query: str, limit: int = 10) -> list:
+    ...
+```
+
+## Quick start — cost & budget
+
+```python
+from codagent.observability import CostTracker, StepBudget, StateTracer
+
+tracer = StateTracer()
+budget = StepBudget(max_steps=20)
+with CostTracker(model="gpt-4o") as cost:
+    for step in run_loop():
+        budget.step()
+        traced = tracer.wrap_node(step.node)
+        result = traced(state)
+        cost.record_call(
+            input_tokens=result.get("_in", 0),
+            output_tokens=result.get("_out", 0),
+        )
+
+print(f"cost ${cost.total_usd:.4f} over {cost.calls} calls, {len(tracer)} traced steps")
+```
+
+## Quick start — harness contracts
+
+```python
+from codagent.harness import (
+    Harness, AssumptionSurface, RefusalPattern, MetaAgentContract,
+)
 
 harness = Harness.compose(
-    RefusalPattern(sensitive_keywords=("legal-advice", "medical-advice")),
-    ToolCallSurface(),
-)
-
-graph.add_node("clarify", assumption_surface_node(my_llm))
-graph.add_conditional_edges(
-    "execute", verification_gate, {"verified": "done", "missing": "retry"}
-)
-```
-
-### LangChain chain wrapping
-
-```python
-from langchain_openai import ChatOpenAI
-from codagent import Harness, AssumptionSurface, VerificationLoop
-from codagent.langchain_integration import HarnessRunnable
-
-chain = HarnessRunnable(
-    Harness.compose(AssumptionSurface(), VerificationLoop()),
-    ChatOpenAI(model="gpt-4o"),
-)
-chain.invoke([{"role": "user", "content": "Should we refund this customer?"}])
-```
-
-### Domain agent injected as harness (meta-agent)
-
-```python
-from anthropic import Anthropic
-from codagent import Harness, MetaAgentContract
-
-claude = Anthropic()
-
-def finance_judge(prompt: str) -> str:
-    msg = claude.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=200,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return msg.content[0].text
-
-finance_supervisor = MetaAgentContract(
-    name="finance-compliance",
-    judge_callable=finance_judge,
-    judge_prompt_template=(
-        "Check whether the response includes the required disclaimer.\n\n"
-        "RESPONSE: {response}\n\n"
-        "Reply with COMPLIANT or NON-compliant."
-    ),
-    system_addendum_text=(
-        "When discussing investments, always include the disclaimer "
-        "'This is not financial advice.'"
-    ),
-)
-
-harness = Harness.compose(finance_supervisor)
-result = harness.validate(model_response_text)
-# {'finance-compliance': {'ok': True/False, ...}, 'all_ok': ...}
-```
-
-## Built-in contracts
-
-| Contract | Use for | Forces |
-|---|---|---|
-| `AssumptionSurface` | any agent | leading `Assumptions:` block when request is ambiguous |
-| `VerificationLoop` | task-completion agents | evidence (test/output) before declaring done |
-| `ToolCallSurface` | tool-use / function-calling agents | explicit `ToolCall:` block before tool invocation |
-| `RefusalPattern` | conversational agents | structured `Refusal:` block for sensitive requests |
-| `CitationRequired` | research / legal / medical agents | `[source: ...]` markers on factual claims |
-| `MetaAgentContract` | any agent needing nuanced policy | LLM-as-judge validation by a supervisor agent |
-
-Compose them freely:
-
-```python
-from codagent import Harness, AssumptionSurface, ToolCallSurface, RefusalPattern
-
-domain_harness = Harness.compose(
     AssumptionSurface(min_items=2),
-    ToolCallSurface(),
-    RefusalPattern(sensitive_keywords=("share my password", "ssn")),
+    RefusalPattern(sensitive_keywords=("medical-advice",)),
+    MetaAgentContract(
+        name="finance-compliance",
+        judge_callable=my_anthropic_judge,
+        judge_prompt_template="Check disclaimer in: {response}",
+    ),
 )
+
+# Inject the system addendum into your messages
+augmented = harness.wrap_messages(messages)
+
+# Validate a response
+result = harness.validate(model_output)
+# {'AssumptionSurface': {'ok': ...}, 'RefusalPattern': {...}, ..., 'all_ok': bool}
 ```
 
-## Architecture
+## End-to-end example
 
-Three orthogonal axes:
+See [`examples/langgraph_full_stack.py`](examples/langgraph_full_stack.py)
+— combines node wrappers + tool decorators + observability + harness in
+one runnable script. No API keys required (uses fake LLM stubs).
 
-```
-Sources of harnesses     Behavior primitives    Application targets
-─────────────────────    ──────────────────     ───────────────────
-HarnessSource            Contract                ApplyTarget
-  from_markdown            AssumptionSurface       LangChain callback
-  from_guardrails_ai       VerificationLoop        LangGraph node
-  from_nemo                ToolCallSurface         OpenAI wrap
-  custom adapter           RefusalPattern          (file targets, bonus)
-                           CitationRequired
-                           MetaAgentContract
-                           your custom Contract
+## Migration from v0.2.0
 
-                            \    /
-                             Harness (compose, validate, apply)
+Top-level imports still work with a `DeprecationWarning`:
+
+```python
+# v0.2.0 (still works through v0.3.x)
+from codagent import AssumptionSurface, Harness
+
+# v0.3.0 recommended
+from codagent.harness import AssumptionSurface, Harness
 ```
 
-Add your own contract: subclass `Contract`, implement `system_addendum`
-and `validate`. Add your own harness source: subclass `HarnessSource`,
-return contracts. PRs welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md).
-
-## Bonus: also works as a coding-agent gude installer
-
-`codagent` also ships a CLI that writes harness rule sets into the
-locations coding agents read (Claude Code, Cursor, Copilot, Codex):
-
-```bash
-codagent install \
-  --from forrestchang/andrej-karpathy-skills \
-  --to claude-code --to cursor --to copilot --to agents-md \
-  --project ./my-app
-```
-
-This is a side feature — the main library is for agentic framework builders.
+The top-level shim will be removed in v0.4.0.
 
 ## Status
 
-`v0.2.0` alpha. Core abstracts (Contract / HarnessSource / ApplyTarget)
-are stable in spirit. Adapters and contract types continue to expand.
+`v0.3.0` alpha. 75 tests passing. Core abstracts stable in spirit.
+PRs welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md).
+
+Roadmap:
+- v0.4.0: `codagent.state` (reducers), `codagent.multi_agent` (supervisor patterns)
+- v0.5.0: `codagent.memory`, `codagent.rag`, `codagent.testing`
 
 ## License
 
