@@ -53,5 +53,8 @@ Repository = "https://github.com/rlaope/codagent"
 [tool.setuptools.packages.find]
 include = ["codagent*"]
 
+[tool.setuptools.package-data]
+"codagent.observability" = ["prices.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -19,8 +19,8 @@ Stubs (placeholder, contributions welcome):
 
 # Re-export framework adapters from existing harness submodule for a
 # unified import surface, plus new ones in this package.
-from codagent.harness.targets.openai_client import wrap_openai
-from codagent.integrations.anthropic_client import wrap_anthropic
+from codagent.harness.targets.openai_client import unwrap_openai, wrap_openai
+from codagent.integrations.anthropic_client import unwrap_anthropic, wrap_anthropic
 from codagent.integrations.pydantic_ai import pydantic_ai_prompt
 
 # LangChain / LangGraph (re-exports)
@@ -38,6 +38,8 @@ __all__ = [
     "assumption_surface_node",
     "make_harness_callback_handler",
     "pydantic_ai_prompt",
+    "unwrap_anthropic",
+    "unwrap_openai",
     "verification_gate",
     "wrap_anthropic",
     "wrap_openai",

@@ -29,19 +29,33 @@ from __future__ import annotations
 from codagent.harness._harness import Harness
 
 
-def wrap_anthropic(client, *contracts):
-    """Patch an Anthropic client so every messages.create gets the harness addendum.
-
-    Mutates ``client.messages.create`` in place and returns the client.
-    """
-    harness = Harness(list(contracts))
+def _resolve_messages(client):
     messages_obj = getattr(client, "messages", None)
     if messages_obj is None or not hasattr(messages_obj, "create"):
         raise TypeError(
             "client does not look like an Anthropic client "
             "(missing messages.create)"
         )
+    return messages_obj
 
+
+def wrap_anthropic(client, *contracts):
+    """Patch an Anthropic client so every messages.create gets the harness addendum.
+
+    Raises ``RuntimeError`` if the client has already been wrapped — call
+    :func:`unwrap_anthropic` first to apply a different harness. Mutates
+    ``client.messages.create`` in place and returns the client. The patched
+    function carries ``_codagent_wrapped`` and ``_codagent_original``
+    attributes so the wrap can be safely reversed.
+    """
+    messages_obj = _resolve_messages(client)
+    if getattr(messages_obj.create, "_codagent_wrapped", False):
+        raise RuntimeError(
+            "Anthropic client is already wrapped by codagent — "
+            "call unwrap_anthropic(client) before re-wrapping"
+        )
+
+    harness = Harness(list(contracts))
     original = messages_obj.create
     addendum = harness.system_addendum()
 
@@ -54,5 +68,20 @@ def wrap_anthropic(client, *contracts):
             kwargs["system"] = (existing + ("\n\n" if existing else "") + addendum).strip()
         return original(*args, **kwargs)
 
+    patched._codagent_wrapped = True  # type: ignore[attr-defined]
+    patched._codagent_original = original  # type: ignore[attr-defined]
     messages_obj.create = patched
+    return client
+
+
+def unwrap_anthropic(client):
+    """Restore the original ``messages.create`` on a wrapped client.
+
+    No-op if the client was not wrapped by codagent. Returns the client
+    unchanged so it composes with builder patterns.
+    """
+    messages_obj = _resolve_messages(client)
+    original = getattr(messages_obj.create, "_codagent_original", None)
+    if original is not None:
+        messages_obj.create = original
     return client

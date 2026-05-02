@@ -1,32 +1,64 @@
 """``CostTracker`` — accumulate input/output tokens, compute USD.
 
-Prices are per 1k tokens, USD, as of late 2025 / early 2026. Update
-the table or pass ``prices`` to override per-tracker. Unknown models
-return cost 0 silently — explicitly set the model to enable pricing.
+Prices live in ``codagent/observability/prices.json`` (per 1k tokens, USD)
+and are loaded on import. Override at runtime via
+``update_prices_from_disk(path)`` — useful when a new model ships before a
+codagent release, or when an enterprise contract sets custom rates. Unknown
+models return cost 0 silently; pass ``prices=`` to a tracker for full
+isolation.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
-# (input_per_1k, output_per_1k) USD
-MODEL_PRICES: dict[str, tuple[float, float]] = {
-    # OpenAI
-    "gpt-4o": (0.0025, 0.010),
-    "gpt-4o-mini": (0.00015, 0.0006),
-    "gpt-4.1": (0.005, 0.020),
-    "o1": (0.015, 0.060),
-    "o1-mini": (0.003, 0.012),
-    # Anthropic (approximate; verify before relying)
-    "claude-opus-4": (0.015, 0.075),
-    "claude-opus-4-5": (0.015, 0.075),
-    "claude-opus-4-7": (0.015, 0.075),
-    "claude-sonnet-4": (0.003, 0.015),
-    "claude-sonnet-4-6": (0.003, 0.015),
-    "claude-haiku-4": (0.0008, 0.004),
-    "claude-haiku-4-5": (0.0008, 0.004),
-}
+def _parse_prices_json(text: str) -> dict[str, tuple[float, float]]:
+    """Parse a prices JSON document into the {(input, output)} shape.
+
+    Accepted forms per entry:
+        {"input": 0.001, "output": 0.002}
+        [0.001, 0.002]
+    """
+    raw = json.loads(text)
+    out: dict[str, tuple[float, float]] = {}
+    for model, value in raw.items():
+        if isinstance(value, dict):
+            out[model] = (float(value["input"]), float(value["output"]))
+        else:
+            out[model] = (float(value[0]), float(value[1]))
+    return out
+
+
+def _load_default_prices() -> dict[str, tuple[float, float]]:
+    try:
+        from importlib.resources import files
+        text = (files("codagent.observability") / "prices.json").read_text(encoding="utf-8")
+    except (FileNotFoundError, ModuleNotFoundError, ImportError):
+        path = Path(__file__).parent / "prices.json"
+        if not path.exists():
+            return {}
+        text = path.read_text(encoding="utf-8")
+    return _parse_prices_json(text)
+
+
+# Module-level default registry. Mutated by update_prices_from_disk() so new
+# CostTracker instances pick up the overrides; existing instances keep their
+# per-instance copy unless they re-read from MODEL_PRICES.
+MODEL_PRICES: dict[str, tuple[float, float]] = _load_default_prices()
+
+
+def update_prices_from_disk(path: str | Path) -> dict[str, tuple[float, float]]:
+    """Merge a JSON pricing file into MODEL_PRICES.
+
+    Returns the parsed dict that was merged. New ``CostTracker`` instances
+    created after this call will see the updates via the default factory.
+    """
+    parsed = _parse_prices_json(Path(path).read_text(encoding="utf-8"))
+    MODEL_PRICES.update(parsed)
+    return parsed
 
 
 @dataclass

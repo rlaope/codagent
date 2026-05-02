@@ -8,7 +8,11 @@
 """
 
 from codagent.observability.budget import BudgetCap
-from codagent.observability.cost import CostTracker, MODEL_PRICES
+from codagent.observability.cost import (
+    CostTracker,
+    MODEL_PRICES,
+    update_prices_from_disk,
+)
 from codagent.observability.steps import (
     BudgetExceeded,
     StepBudget,
@@ -24,4 +28,5 @@ __all__ = [
     "StateTracer",
     "StepBudget",
     "StepCounter",
+    "update_prices_from_disk",
 ]

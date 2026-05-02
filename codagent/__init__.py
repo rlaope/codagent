@@ -10,15 +10,12 @@ Modules:
 
 The harness module is the original codagent surface; everything that
 used to be importable as ``from codagent import X`` lives now under
-``codagent.harness.X``. Re-exports at this top level remain for one
-minor cycle with a DeprecationWarning.
+``codagent.harness.X``. The names below are re-exported at this top
+level for backward compatibility with pre-0.4 imports.
 """
 
 from __future__ import annotations
 
-import warnings as _warnings
-
-# Public re-export: harness API still importable from codagent.* with a warning.
 from codagent.harness import (
     ApplyTarget,
     AssumptionSurface,
@@ -34,7 +31,6 @@ from codagent.harness import (
 
 
 __all__ = [
-    # Re-exported from codagent.harness for one deprecation cycle.
     "ApplyTarget",
     "AssumptionSurface",
     "CitationRequired",

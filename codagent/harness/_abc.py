@@ -10,10 +10,6 @@ ApplyTarget    — consumes Contracts and writes them to a runtime
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    pass
 
 
 class Contract(ABC):

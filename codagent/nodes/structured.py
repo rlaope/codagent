@@ -26,7 +26,7 @@ def parse_structured(parser: Callable[[Any], Any]) -> Callable[[Callable], Calla
         def my_node(state): ...
 
     The wrapper handles common return shapes:
-      - dict        -> parser(**dict)? No, parser(dict) — caller chooses.
+      - dict        -> parser(dict)
       - JSON string -> json.loads then parser(parsed)
       - already a parser-shaped instance -> returned as-is
     """

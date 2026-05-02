@@ -24,6 +24,29 @@ from typing import Callable
 from codagent.harness._abc import Contract
 
 
+# -- Judge fallback (i18n / format-variant tolerance) -----------------------
+#
+# Regex contracts pass cheaply when the response is in English and uses the
+# canonical block headings. If a ``judge`` callable is supplied, the contract
+# falls back to LLM-as-judge when the regex check fails — which lets the
+# contract accept "전제:", "前提:", "Hipótesis:" or other valid forms that
+# regex cannot anticipate. The judge runs only on regex misses, so the cost
+# is bounded by failure rate rather than call rate.
+
+_JUDGE_YES_RE = re.compile(r"(?im)^\s*YES\b")
+_JUDGE_NO_RE = re.compile(r"(?im)^\s*NO\b")
+
+
+def _judge_yes_no(judge: Callable[[str], str], prompt: str) -> tuple[bool, str]:
+    """Run a judge and parse a single-line YES / NO verdict."""
+    verdict = (judge(prompt) or "").strip()
+    if _JUDGE_NO_RE.match(verdict):
+        return False, f"judge: {verdict[:200]}"
+    if _JUDGE_YES_RE.match(verdict):
+        return True, ""
+    return False, f"judge unclear: {verdict[:200]}"
+
+
 # -- Karpathy core ----------------------------------------------------------
 
 _ASSUMPTION_HEADING_RE = re.compile(r"(?im)^\s*[*#]*\s*Assumptions?\b\s*[:\s]")
@@ -52,6 +75,7 @@ class AssumptionSurface(Contract):
 
     min_items: int = 1
     name: str = "AssumptionSurface"
+    judge: Callable[[str], str] | None = None
 
     def system_addendum(self) -> str:
         return (
@@ -67,13 +91,30 @@ class AssumptionSurface(Contract):
             "Each item is something the user can correct in one word."
         )
 
+    def _judge_prompt(self, response: str) -> str:
+        return (
+            "You are validating whether an LLM response surfaces assumptions "
+            "before acting. The response should begin with an explicit list "
+            "of assumptions (in any language; e.g. `Assumptions:`, `전제:`, "
+            "`前提:`). It must contain at least "
+            f"{self.min_items} assumption item(s).\n\n"
+            f"RESPONSE:\n{response}\n\n"
+            "Reply on a single line:\n"
+            "  YES — if the response surfaces enough assumptions explicitly\n"
+            "  NO: <reason> — otherwise"
+        )
+
     def validate(self, response: str) -> tuple[bool, str]:
-        if not _ASSUMPTION_HEADING_RE.search(response):
-            return False, "no `Assumptions:` heading found"
-        items = len(_ASSUMPTION_ITEM_RE.findall(response))
-        if items < self.min_items:
-            return False, f"found {items} bullet items, need at least {self.min_items}"
-        return True, ""
+        if _ASSUMPTION_HEADING_RE.search(response):
+            items = len(_ASSUMPTION_ITEM_RE.findall(response))
+            if items >= self.min_items:
+                return True, ""
+            reason = f"found {items} bullet items, need at least {self.min_items}"
+        else:
+            reason = "no `Assumptions:` heading found"
+        if self.judge is None:
+            return False, reason
+        return _judge_yes_no(self.judge, self._judge_prompt(response))
 
 
 @dataclass
@@ -81,6 +122,7 @@ class VerificationLoop(Contract):
     """Force the agent to back any 'done' claim with evidence."""
 
     name: str = "VerificationLoop"
+    judge: Callable[[str], str] | None = None
 
     def system_addendum(self) -> str:
         return (
@@ -96,12 +138,29 @@ class VerificationLoop(Contract):
             "\"I believe\" as a substitute for evidence."
         )
 
+    def _judge_prompt(self, response: str) -> str:
+        return (
+            "You are validating whether an LLM response backs any 'done' "
+            "claim with concrete evidence (test output, command output, diff) "
+            "or honestly admits non-verification. Hand-wavy phrases like "
+            "'should work' / 'looks correct' / 'I believe' do NOT count as "
+            "evidence, in any language.\n\n"
+            f"RESPONSE:\n{response}\n\n"
+            "Reply on a single line:\n"
+            "  YES — if evidence is present OR non-verification is admitted\n"
+            "  NO: <reason> — if it claims completion without evidence"
+        )
+
     def validate(self, response: str) -> tuple[bool, str]:
         if _UNBACKED_RE.search(response):
-            return False, "unbacked claim phrase detected"
-        if not _EVIDENCE_RE.search(response) and "i have not verified" not in response.lower():
-            return False, "no evidence markers and no honest 'not verified' note"
-        return True, ""
+            reason = "unbacked claim phrase detected"
+        elif not _EVIDENCE_RE.search(response) and "i have not verified" not in response.lower():
+            reason = "no evidence markers and no honest 'not verified' note"
+        else:
+            return True, ""
+        if self.judge is None:
+            return False, reason
+        return _judge_yes_no(self.judge, self._judge_prompt(response))
 
 
 # -- Tool-use ---------------------------------------------------------------
@@ -119,6 +178,7 @@ class ToolCallSurface(Contract):
     """
 
     name: str = "ToolCallSurface"
+    judge: Callable[[str], str] | None = None
 
     def system_addendum(self) -> str:
         return (
@@ -135,16 +195,29 @@ class ToolCallSurface(Contract):
             "and answer directly."
         )
 
+    def _judge_prompt(self, response: str) -> str:
+        return (
+            "You are validating whether an LLM response declares tool intent "
+            "before invoking a tool. If a tool is invoked, a `ToolCall:` "
+            "block (or equivalent in any language) must precede it stating "
+            "which tool, why, and what to expect. If no tool is invoked, "
+            "the response passes vacuously.\n\n"
+            f"RESPONSE:\n{response}\n\n"
+            "Reply on a single line:\n"
+            "  YES — if no tool is invoked, or intent is declared first\n"
+            "  NO: <reason> — if a tool is invoked silently"
+        )
+
     def validate(self, response: str) -> tuple[bool, str]:
-        # We only enforce: if the response mentions executing a tool, a
-        # ToolCall: block must appear. Inferring tool calls from text is
-        # fragile, so this is a best-effort check.
         looks_like_tool_call = bool(
             re.search(r"(?i)\b(calling|invoking|executing|using)\s+(the\s+)?\w+\s+tool", response)
         )
-        if looks_like_tool_call and not _TOOLCALL_HEADING_RE.search(response):
-            return False, "tool invocation hinted but no `ToolCall:` block found"
-        return True, ""
+        if not looks_like_tool_call or _TOOLCALL_HEADING_RE.search(response):
+            return True, ""
+        reason = "tool invocation hinted but no `ToolCall:` block found"
+        if self.judge is None:
+            return False, reason
+        return _judge_yes_no(self.judge, self._judge_prompt(response))
 
 
 # -- Conversational / domain ------------------------------------------------
@@ -163,6 +236,7 @@ class RefusalPattern(Contract):
 
     sensitive_keywords: tuple[str, ...] = field(default_factory=tuple)
     name: str = "RefusalPattern"
+    judge: Callable[[str], str] | None = None
 
     def system_addendum(self) -> str:
         kw = ", ".join(self.sensitive_keywords) if self.sensitive_keywords else "[domain-specific]"
@@ -175,16 +249,30 @@ class RefusalPattern(Contract):
             f"explicit and machine-readable so calling code can branch on them."
         )
 
+    def _judge_prompt(self, response: str, touched: list[str]) -> str:
+        return (
+            "You are validating whether an LLM response includes an explicit "
+            "refusal block (in any language; e.g. `Refusal:`, `거절:`, "
+            "`拒否:`) when the response touches sensitive topics. The block "
+            "must state the policy invoked AND the user's alternative.\n\n"
+            f"SENSITIVE TOPICS TOUCHED: {touched}\n"
+            f"RESPONSE:\n{response}\n\n"
+            "Reply on a single line:\n"
+            "  YES — if the refusal is explicit (policy + alternative)\n"
+            "  NO: <reason> — otherwise"
+        )
+
     def validate(self, response: str) -> tuple[bool, str]:
-        # If response does not mention sensitive keywords, contract passes
-        # vacuously. Otherwise, demand a Refusal: block.
         if not self.sensitive_keywords:
             return True, ""
         rl = response.lower()
         touched = [k for k in self.sensitive_keywords if k.lower() in rl]
-        if touched and not _REFUSAL_HEADING_RE.search(response):
-            return False, f"sensitive keyword(s) present {touched} but no `Refusal:` block"
-        return True, ""
+        if not touched or _REFUSAL_HEADING_RE.search(response):
+            return True, ""
+        reason = f"sensitive keyword(s) present {touched} but no `Refusal:` block"
+        if self.judge is None:
+            return False, reason
+        return _judge_yes_no(self.judge, self._judge_prompt(response, touched))
 
 
 _CITATION_RE = re.compile(r"\[source:[^\]]+\]")
@@ -200,6 +288,7 @@ class CitationRequired(Contract):
 
     min_citations: int = 1
     name: str = "CitationRequired"
+    judge: Callable[[str], str] | None = None
 
     def system_addendum(self) -> str:
         return (
@@ -210,11 +299,27 @@ class CitationRequired(Contract):
             "need citations — only factual claims."
         )
 
+    def _judge_prompt(self, response: str) -> str:
+        return (
+            "You are validating whether an LLM response carries citations on "
+            "every factual claim. Acceptable forms include `[source: ...]`, "
+            "footnotes, inline URLs, or equivalent in any language (e.g. "
+            "`[출처: ...]`, `[ソース: ...]`). The response must carry at "
+            f"least {self.min_citations} citation(s).\n\n"
+            f"RESPONSE:\n{response}\n\n"
+            "Reply on a single line:\n"
+            f"  YES — if at least {self.min_citations} citation(s) are present\n"
+            "  NO: <reason> — otherwise"
+        )
+
     def validate(self, response: str) -> tuple[bool, str]:
         n = len(_CITATION_RE.findall(response))
-        if n < self.min_citations:
-            return False, f"found {n} citation markers, need at least {self.min_citations}"
-        return True, ""
+        if n >= self.min_citations:
+            return True, ""
+        reason = f"found {n} citation markers, need at least {self.min_citations}"
+        if self.judge is None:
+            return False, reason
+        return _judge_yes_no(self.judge, self._judge_prompt(response))
 
 
 # -- Meta-agent (domain agent injected as harness) --------------------------
@@ -350,10 +455,11 @@ class MetaAgentContract(Contract):
 
     def validate(self, response: str) -> tuple[bool, str]:
         prompt = self._template.format(response=response, marker=self._marker)
-        judgment = (self._judge(prompt) or "").upper()
+        judgment = self._judge(prompt) or ""
+        upper = judgment.upper()
         marker_up = self._marker.upper()
-        if re.search(rf"(NON-|NOT\s+){re.escape(marker_up)}", judgment):
+        if re.search(rf"(NON-|NOT\s+){re.escape(marker_up)}", upper):
             return False, f"meta-agent judgment: {judgment.strip()[:200]}"
-        if marker_up in judgment:
+        if marker_up in upper:
             return True, ""
         return False, f"meta-agent judgment: {judgment.strip()[:200]}"
