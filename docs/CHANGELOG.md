@@ -2,7 +2,67 @@
 
 Version history for codagent.
 
-## v0.4.1 (current)
+## v0.5.0 (current)
+
+**Production safety release — three new guardrails for runaway agents.**
+
+Each addition fills a gap LangGraph leaves to the developer and is
+independently small enough to audit (~30–80 lines + tests). All three
+were prioritized after surveying production agent failure modes
+documented in 2025–2026 LangGraph/LangChain post-mortems.
+
+### Added
+
+- `BudgetCap` (`codagent.observability.BudgetCap`): hard USD ceiling
+  on top of a `CostTracker`. Raises `BudgetExceeded` once cumulative
+  spend crosses the cap. Two modes: route LLM calls through
+  `cap.record_call(...)` for auto-check, or call `cap.check()` at
+  graph step boundaries. Multiple caps can observe one tracker (e.g.
+  per-run + per-day). Closes the "$200 silent retry loop" failure
+  mode that LangGraph itself leaves to the user.
+
+- `with_loop_guard` (`codagent.nodes.with_loop_guard`): wraps a tool
+  or node and tracks fingerprints of recent invocations. After
+  `max_repeats` identical fingerprints inside a rolling `window`,
+  raises `LoopDetected`. Catches the classic agent thrashing failure
+  mode (same tool, same args, dozens of calls). Default fingerprint
+  JSON-serializes args/kwargs; pass `key_fn=` to override. Each
+  wrapped callable owns its own counter, so wrapping twice gives
+  independent state.
+
+- `FaithfulnessContract` (`codagent.harness.FaithfulnessContract`):
+  RAG-grounding contract — LLM-as-judge over `(retrieved_context,
+  response)` to detect claims not grounded in context. Catches the
+  failure mode where `CitationRequired` passes (markers present) but
+  the cited fact was hallucinated. RAGAS-style without the dependency.
+  Stateful: call `contract.set_context(docs)` after retrieval; or pass
+  `context_provider=` for lazy lookup. Skips gracefully when no judge
+  or no context is configured.
+
+### Why these three (and not others)
+
+Surveyed gaps:
+
+| Pattern | Already covered? | Decision |
+|---|---|---|
+| Cost ceiling / kill switch | LangGraph leaves to user | **add `BudgetCap`** |
+| Tool loop / thrashing | LangChain middleware partial | **add `with_loop_guard`** |
+| RAG grounding (faithfulness) | `CitationRequired` (regex) only | **add `FaithfulnessContract`** |
+| Prompt caching helper | LiteLLM, Instructor, Pydantic AI cover this | skip (saturated) |
+| Chunking utilities | LangChain text_splitters / unstructured.io | skip (scope creep) |
+| Long-term memory | Mem0 / Letta / AgentCore | skip (infra domain) |
+| Web scraping | Firecrawl / Trafilatura / Jina Reader | skip (different domain) |
+| Checkpointing | LangGraph native | skip (already there) |
+
+### Tests
+
+- 5 new `BudgetCap` tests in `tests/test_observability.py`
+- 8 new `with_loop_guard` tests in `tests/test_nodes.py`
+- 11 new `FaithfulnessContract` tests in `tests/test_contracts.py`
+
+Total: 110 tests passing (was 86 in v0.4.1).
+
+## v0.4.1
 
 **Patch — discovered while dogfooding via codagent-rag-demo.**
 

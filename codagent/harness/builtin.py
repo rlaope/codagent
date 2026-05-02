@@ -220,6 +220,101 @@ class CitationRequired(Contract):
 # -- Meta-agent (domain agent injected as harness) --------------------------
 
 
+_FAITHFULNESS_PROMPT = """You are a faithfulness judge for a retrieval-augmented \
+answer.
+
+CONTEXT (retrieved documents, separated by ---):
+{context}
+
+RESPONSE (the agent's answer):
+{response}
+
+Question: are ALL factual claims in RESPONSE supported by CONTEXT?
+A claim is supported only if the same fact appears in CONTEXT — paraphrasing \
+is fine, but new facts that are not in CONTEXT are not supported.
+
+Reply on a single line, in this exact format:
+  FAITHFUL  — if every factual claim is supported
+  UNFAITHFUL: <one-sentence reason citing the unsupported claim>
+"""
+
+
+@dataclass
+class FaithfulnessContract(Contract):
+    """LLM-as-judge contract for RAG grounding (RAGAS-style faithfulness).
+
+    Validates that every factual claim in the agent's response is
+    supported by retrieved context. Catches the failure mode where
+    ``CitationRequired`` passes (markers present) but the cited fact
+    was actually hallucinated and the citation is decorative.
+
+    Stateful by design: call :meth:`set_context` after retrieval and
+    before validation. Pass ``context_provider`` to read context lazily
+    instead (useful when Harness lifecycle is fixed).
+
+    Example:
+
+        judge = lambda p: openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": p}],
+        ).choices[0].message.content
+        faith = FaithfulnessContract(judge=judge)
+        harness = Harness.compose(CitationRequired(), faith)
+
+        # in retrieve node: faith.set_context([d.text for d in docs])
+        # in validate: harness.validate(answer)
+    """
+
+    judge: Callable[[str], str] | None = None
+    name: str = "Faithfulness"
+    context_provider: Callable[[], str | list[str] | None] | None = None
+    _current_context: str = field(default="", init=False, repr=False)
+
+    def set_context(self, context: str | list[str] | None) -> None:
+        """Inject retrieved context for the next validation call."""
+        if context is None:
+            self._current_context = ""
+            return
+        if isinstance(context, list):
+            self._current_context = "\n---\n".join(str(c) for c in context)
+        else:
+            self._current_context = str(context)
+
+    def _resolve_context(self) -> str:
+        if self.context_provider is not None:
+            ctx = self.context_provider()
+            if ctx is None:
+                return ""
+            if isinstance(ctx, list):
+                return "\n---\n".join(str(c) for c in ctx)
+            return str(ctx)
+        return self._current_context
+
+    def system_addendum(self) -> str:
+        return (
+            "Every factual claim in your response must be supported by the "
+            "retrieved context (the documents the system put in front of you). "
+            "Do not introduce facts that are not in the context. If the "
+            "context lacks the information needed for a claim, say so "
+            "explicitly rather than inventing or speculating."
+        )
+
+    def validate(self, response: str) -> tuple[bool, str]:
+        if self.judge is None:
+            return True, "faithfulness skipped: no judge configured"
+        context = self._resolve_context()
+        if not context:
+            return True, "faithfulness skipped: no context provided"
+        prompt = _FAITHFULNESS_PROMPT.format(context=context, response=response)
+        verdict = (self.judge(prompt) or "").strip()
+        upper = verdict.upper()
+        if re.search(r"\bUNFAITHFUL\b|\bNOT\s+FAITHFUL\b", upper):
+            return False, f"unfaithful: {verdict[:200]}"
+        if "FAITHFUL" in upper:
+            return True, ""
+        return False, f"unclear faithfulness verdict: {verdict[:200]}"
+
+
 class MetaAgentContract(Contract):
     """A Contract whose validate() runs an LLM as judge.
 

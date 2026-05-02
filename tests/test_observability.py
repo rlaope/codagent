@@ -5,6 +5,7 @@ import json
 import pytest
 
 from codagent.observability import (
+    BudgetCap,
     BudgetExceeded,
     CostTracker,
     StateTracer,
@@ -119,3 +120,52 @@ def test_tracer_on_step_callback():
     tracer.wrap_node(lambda s: {}, name="cb")({})
     assert len(seen) == 1
     assert seen[0]["name"] == "cb"
+
+
+# -- BudgetCap --------------------------------------------------------------
+
+
+def test_budget_cap_rejects_zero_or_negative():
+    t = CostTracker(model="gpt-4o-mini")
+    with pytest.raises(ValueError):
+        BudgetCap(tracker=t, usd=0)
+    with pytest.raises(ValueError):
+        BudgetCap(tracker=t, usd=-1.0)
+
+
+def test_budget_cap_does_not_raise_under_limit():
+    t = CostTracker(model="gpt-4o-mini")
+    cap = BudgetCap(tracker=t, usd=1.0)
+    cap.record_call(input_tokens=1000, output_tokens=1000)
+    cap.check()
+    assert cap.exceeded is False
+    assert cap.remaining_usd > 0
+
+
+def test_budget_cap_raises_when_exceeded():
+    t = CostTracker(model="gpt-4o")  # 0.0025 in / 0.010 out per 1k
+    cap = BudgetCap(tracker=t, usd=0.005)
+    # 1000 in + 1000 out = 0.0025 + 0.010 = 0.0125 > 0.005
+    with pytest.raises(BudgetExceeded):
+        cap.record_call(input_tokens=1000, output_tokens=1000)
+    assert cap.exceeded is True
+    assert cap.remaining_usd == 0.0
+
+
+def test_budget_cap_check_only_mode():
+    t = CostTracker(model="gpt-4o")
+    cap = BudgetCap(tracker=t, usd=0.001)
+    # Use the underlying tracker directly; cap.check() guards externally.
+    t.record_call(input_tokens=1000, output_tokens=1000)
+    with pytest.raises(BudgetExceeded):
+        cap.check()
+
+
+def test_budget_cap_multiple_caps_share_tracker():
+    t = CostTracker(model="gpt-4o-mini")
+    soft = BudgetCap(tracker=t, usd=0.001)
+    hard = BudgetCap(tracker=t, usd=10.0)
+    t.record_call(input_tokens=10_000, output_tokens=10_000)
+    # gpt-4o-mini: 10k * 0.00015 + 10k * 0.0006 = 0.0015 + 0.006 = 0.0075
+    assert soft.exceeded is True
+    assert hard.exceeded is False

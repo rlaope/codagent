@@ -68,18 +68,19 @@ pip install codagent[nemo]           # wrap NeMo Guardrails flows
 ```
 codagent/
 ├── nodes/              composable node wrappers
-│   with_retry, with_timeout, with_cache, parse_structured
+│   with_retry, with_timeout, with_cache, parse_structured,
+│   with_loop_guard
 │
 ├── tools/              tool callable hardening
 │   validated_tool, circuit_breaker, rate_limit
 │
 ├── observability/      production tracking
-│   CostTracker, StepBudget, StateTracer
+│   CostTracker, BudgetCap, StepBudget, StateTracer
 │
 ├── harness/            behavior contracts
-│   Harness composer, 6 built-in contracts (Assumption Surface,
+│   Harness composer, 7 built-in contracts (Assumption Surface,
 │   Verification Loop, Tool Call Surface, Refusal Pattern,
-│   Citation Required, MetaAgent Contract)
+│   Citation Required, Faithfulness, MetaAgent Contract)
 │
 └── integrations/       Python LLM ecosystem adapters
     wrap_openai, wrap_anthropic, pydantic_ai_prompt,
@@ -155,9 +156,9 @@ Settings.callback_manager = CallbackManager([
 ### Production hardening (any framework)
 
 ```python
-from codagent.nodes import with_retry, with_cache
+from codagent.nodes import with_retry, with_cache, with_loop_guard
 from codagent.tools import circuit_breaker, rate_limit
-from codagent.observability import CostTracker, StepBudget
+from codagent.observability import BudgetCap, CostTracker, StepBudget
 
 # Stack node wrappers
 robust_node = with_retry(
@@ -166,16 +167,38 @@ robust_node = with_retry(
     on=(ConnectionError,),
 )
 
-# Decorate tools
+# Decorate tools — and guard against agent thrashing
 @circuit_breaker(failure_threshold=5, reset_after=60)
 @rate_limit(per_second=10)
-def search_db(query: str): ...
+def _search_db(query: str): ...
+search_db = with_loop_guard(_search_db, window=10, max_repeats=3)
 
-# Track cost + bound steps
+# Track cost + bound steps + hard USD ceiling
 budget = StepBudget(max_steps=20)
-with CostTracker(model="gpt-4o") as cost:
+cost = CostTracker(model="gpt-4o")
+cap = BudgetCap(tracker=cost, usd=2.0)  # raises BudgetExceeded if a run blows past $2
+with cost:
     result = run_my_agent(...)
+    cap.check()  # call at safe boundaries, or route LLM calls through cap.record_call()
 print(f"${cost.total_usd:.4f} over {cost.calls} calls")
+```
+
+### RAG faithfulness (catch hallucinations regex can't)
+
+```python
+from codagent.harness import Harness, CitationRequired, FaithfulnessContract
+
+faith = FaithfulnessContract(judge=my_llm_judge)  # any callable str -> str
+harness = Harness.compose(CitationRequired(), faith)
+
+# In your retrieve node:
+docs = retriever.search(query, k=3)
+faith.set_context([d.text for d in docs])
+
+# In validation:
+result = harness.validate(answer)
+# CitationRequired: regex check that [source: ...] markers exist
+# FaithfulnessContract: judge confirms each factual claim is grounded in context
 ```
 
 ## Built-in behavior contracts
@@ -187,6 +210,7 @@ print(f"${cost.total_usd:.4f} over {cost.calls} calls")
 | `ToolCallSurface` | explicit `ToolCall:` block before tool invocation |
 | `RefusalPattern` | structured `Refusal:` block on sensitive keywords |
 | `CitationRequired` | `[source: ...]` markers on factual claims |
+| `FaithfulnessContract` | every claim grounded in retrieved RAG context (LLM-as-judge) |
 | `MetaAgentContract` | LLM-as-judge validation by a supervisor agent |
 
 Compose them: `Harness.compose(AssumptionSurface(), CitationRequired(), ...)`.
@@ -199,8 +223,11 @@ one runnable script (offline — no API keys required).
 
 ## Status
 
-`v0.4.0` alpha. Core is stable; framework adapters expand as the
-ecosystem evolves.
+`v0.5.0` alpha. Core is stable; framework adapters expand as the
+ecosystem evolves. v0.5.0 added three production guardrails
+(`BudgetCap`, `with_loop_guard`, `FaithfulnessContract`) that fill
+gaps LangGraph leaves to the developer — see
+[CHANGELOG](docs/CHANGELOG.md) for the rationale and survey.
 
 ## License
 

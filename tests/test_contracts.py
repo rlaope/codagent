@@ -7,6 +7,7 @@ from codagent import (
     RefusalPattern,
     ToolCallSurface,
 )
+from codagent.harness import FaithfulnessContract
 
 
 # -- ToolCallSurface --------------------------------------------------------
@@ -148,3 +149,114 @@ def test_harness_composes_with_all_new_contracts():
     assert "ToolCall:" in addendum
     assert "Refusal:" in addendum
     assert "[source:" in addendum
+
+
+# -- FaithfulnessContract ---------------------------------------------------
+
+
+def test_faithfulness_skips_when_no_judge():
+    c = FaithfulnessContract()
+    c.set_context(["doc1: with_retry retries on listed errors"])
+    ok, msg = c.validate("Anything here.")
+    assert ok
+    assert "no judge" in msg
+
+
+def test_faithfulness_skips_when_no_context():
+    c = FaithfulnessContract(judge=lambda p: "FAITHFUL")
+    ok, msg = c.validate("Some response.")
+    assert ok
+    assert "no context" in msg
+
+
+def test_faithfulness_pass_when_judge_says_faithful():
+    seen_prompts = []
+    def judge(p):
+        seen_prompts.append(p)
+        return "FAITHFUL"
+    c = FaithfulnessContract(judge=judge)
+    c.set_context(["with_retry retries on listed exception types."])
+    ok, msg = c.validate("with_retry retries on listed errors.")
+    assert ok
+    assert msg == ""
+    assert "with_retry retries on listed exception types" in seen_prompts[0]
+    assert "with_retry retries on listed errors" in seen_prompts[0]
+
+
+def test_faithfulness_fail_on_unfaithful_verdict():
+    c = FaithfulnessContract(
+        judge=lambda p: "UNFAITHFUL: claim about ConnectionError not in context"
+    )
+    c.set_context(["with_retry retries any exception you specify."])
+    ok, msg = c.validate("with_retry retries ConnectionError specifically.")
+    assert not ok
+    assert "ConnectionError" in msg
+
+
+def test_faithfulness_fail_on_not_faithful_verdict():
+    c = FaithfulnessContract(judge=lambda p: "NOT FAITHFUL: invented claim")
+    c.set_context(["doc text"])
+    ok, _ = c.validate("response")
+    assert not ok
+
+
+def test_faithfulness_fail_on_unclear_verdict():
+    c = FaithfulnessContract(judge=lambda p: "I'm not sure honestly")
+    c.set_context(["doc text"])
+    ok, msg = c.validate("response")
+    assert not ok
+    assert "unclear" in msg
+
+
+def test_faithfulness_set_context_accepts_string_or_list():
+    c = FaithfulnessContract(judge=lambda p: "FAITHFUL")
+    c.set_context("single string context")
+    ok, _ = c.validate("response")
+    assert ok
+    c.set_context(["doc1", "doc2", "doc3"])
+    ok, _ = c.validate("response")
+    assert ok
+
+
+def test_faithfulness_set_context_none_clears():
+    c = FaithfulnessContract(judge=lambda p: "FAITHFUL")
+    c.set_context(["doc"])
+    c.set_context(None)
+    ok, msg = c.validate("response")
+    assert ok
+    assert "no context" in msg
+
+
+def test_faithfulness_with_context_provider():
+    docs = ["initial doc"]
+    c = FaithfulnessContract(
+        judge=lambda p: "FAITHFUL" if "initial" in p else "UNFAITHFUL",
+        context_provider=lambda: docs,
+    )
+    ok, _ = c.validate("response")
+    assert ok
+    docs[0] = "different doc"
+    ok, _ = c.validate("response")
+    assert not ok
+
+
+def test_faithfulness_system_addendum_mentions_grounding():
+    c = FaithfulnessContract()
+    addendum = c.system_addendum()
+    assert "context" in addendum.lower()
+    assert "support" in addendum.lower() or "grounded" in addendum.lower()
+
+
+def test_faithfulness_composes_in_harness():
+    judge_calls = []
+    def judge(p):
+        judge_calls.append(p)
+        return "FAITHFUL"
+    faith = FaithfulnessContract(judge=judge)
+    h = Harness.compose(CitationRequired(min_citations=1), faith)
+    faith.set_context(["with_retry retries on listed exceptions."])
+    response = "with_retry retries on listed errors [source: nodes.md]."
+    result = h.validate(response)
+    assert result["all_ok"] is True
+    assert result["Faithfulness"]["ok"] is True
+    assert len(judge_calls) == 1

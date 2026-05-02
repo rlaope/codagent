@@ -5,9 +5,11 @@ import time
 import pytest
 
 from codagent.nodes import (
+    LoopDetected,
     NodeTimeout,
     parse_structured,
     with_cache,
+    with_loop_guard,
     with_retry,
     with_timeout,
 )
@@ -134,3 +136,97 @@ def test_parse_structured_with_json_string():
     @parse_structured(lambda d: d)
     def node(state): return '{"a": 1, "b": 2}'
     assert node({}) == {"a": 1, "b": 2}
+
+
+# -- with_loop_guard --------------------------------------------------------
+
+
+def test_loop_guard_allows_distinct_calls():
+    calls = []
+    def tool(*, query):
+        calls.append(query)
+        return query
+    guarded = with_loop_guard(tool, window=5, max_repeats=3)
+    for q in ("a", "b", "c", "d", "e"):
+        guarded(query=q)
+    assert calls == ["a", "b", "c", "d", "e"]
+
+
+def test_loop_guard_allows_repeats_under_threshold():
+    def tool(*, query):
+        return query
+    guarded = with_loop_guard(tool, window=5, max_repeats=3)
+    guarded(query="x")
+    guarded(query="x")
+    guarded(query="x")  # 3rd identical, still allowed
+
+
+def test_loop_guard_raises_on_excess_repeats():
+    def tool(*, query):
+        return query
+    guarded = with_loop_guard(tool, window=10, max_repeats=3)
+    guarded(query="x")
+    guarded(query="x")
+    guarded(query="x")
+    with pytest.raises(LoopDetected):
+        guarded(query="x")
+
+
+def test_loop_guard_distinguishes_args():
+    def tool(*, q):
+        return q
+    guarded = with_loop_guard(tool, window=10, max_repeats=2)
+    guarded(q="a")
+    guarded(q="a")
+    guarded(q="b")  # different fingerprint, ok
+    guarded(q="b")
+    with pytest.raises(LoopDetected):
+        guarded(q="a")  # 3rd "a" exceeds
+
+
+def test_loop_guard_window_evicts_old_calls():
+    def tool(*, q):
+        return q
+    guarded = with_loop_guard(tool, window=3, max_repeats=2)
+    guarded(q="a")
+    guarded(q="a")
+    guarded(q="b")
+    guarded(q="b")  # evicts first "a"
+    # window now: [a, b, b]; one "a" remains, so a third "a" call is OK
+    guarded(q="a")
+    # now window: [b, b, a]; another "a" → 2 "a"s in window, still OK
+    guarded(q="a")
+    with pytest.raises(LoopDetected):
+        guarded(q="a")
+
+
+def test_loop_guard_custom_key_fn():
+    def tool(payload):
+        return payload["id"]
+    guarded = with_loop_guard(
+        tool,
+        window=5,
+        max_repeats=2,
+        key_fn=lambda payload: payload["id"],
+    )
+    guarded({"id": 1, "x": "noise"})
+    guarded({"id": 1, "x": "different"})
+    with pytest.raises(LoopDetected):
+        guarded({"id": 1, "x": "yet-other"})
+
+
+def test_loop_guard_validates_params():
+    with pytest.raises(ValueError):
+        with_loop_guard(lambda: None, window=0, max_repeats=1)
+    with pytest.raises(ValueError):
+        with_loop_guard(lambda: None, window=1, max_repeats=0)
+
+
+def test_loop_guard_handles_unhashable_args():
+    def tool(state):
+        return state.get("q", "")
+    guarded = with_loop_guard(tool, window=10, max_repeats=2)
+    guarded({"q": "x", "items": [1, 2, 3]})
+    guarded({"q": "x", "items": [1, 2, 3]})
+    with pytest.raises(LoopDetected):
+        guarded({"q": "x", "items": [1, 2, 3]})

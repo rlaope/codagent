@@ -27,6 +27,7 @@ from codagent.harness._harness import Harness
 from codagent.harness.builtin import (
     AssumptionSurface,
     CitationRequired,
+    FaithfulnessContract,
     MetaAgentContract,
     RefusalPattern,
     ToolCallSurface,
@@ -38,6 +39,7 @@ __all__ = [
     "AssumptionSurface",
     "CitationRequired",
     "Contract",
+    "FaithfulnessContract",
     "Harness",
     "HarnessSource",
     "MetaAgentContract",

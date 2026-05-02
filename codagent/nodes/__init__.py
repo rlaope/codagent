@@ -14,14 +14,17 @@ callable, not just LangGraph nodes.
 """
 
 from codagent.nodes.cache import with_cache
+from codagent.nodes.loop_guard import LoopDetected, with_loop_guard
 from codagent.nodes.retry import with_retry
 from codagent.nodes.structured import parse_structured
 from codagent.nodes.timeout import NodeTimeout, with_timeout
 
 __all__ = [
+    "LoopDetected",
     "NodeTimeout",
     "parse_structured",
     "with_cache",
+    "with_loop_guard",
     "with_retry",
     "with_timeout",
 ]

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codagent"
-version = "0.4.1"
+version = "0.5.0"
 description = "Production utilities for Python LLM agents — node wrappers (retry/timeout/cache), tool decorators (validate/circuit/rate-limit), observability (cost/step/trace), behavior contracts. Works with LangGraph, LangChain, LlamaIndex, CrewAI, AutoGen, DSPy, Pydantic AI, OpenAI, Anthropic."
 readme = "README.md"
 requires-python = ">=3.10"
