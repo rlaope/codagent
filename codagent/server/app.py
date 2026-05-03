@@ -1,22 +1,29 @@
 """Starlette app factory for the codagent agent-server.
 
-Exposes a single endpoint, ``POST /v1/runs``, that streams the output of an
-async-generator LLM callable as Server-Sent Events. The endpoint polls
-``request.is_disconnected()`` between yielded tokens; if the client has
-disconnected, the loop exits and the LLM async generator is closed,
-which propagates ``CancelledError`` into the upstream call.
+Endpoints:
+
+- ``POST /v1/runs`` — start a run; returns ``{run_id, status}``
+  immediately. The run executes in a background task.
+- ``GET /v1/runs/{id}`` — current snapshot of a run.
+- ``POST /v1/runs/{id}/cancel`` — request cooperative cancellation.
+- ``GET /v1/runs/{id}/events`` — SSE stream of the run's events.
+  Honours the ``Last-Event-Id`` request header for replay.
+- ``GET /healthz`` — liveness probe.
+
+The previous Phase 1 single-shot streaming POST has been replaced by
+this run-as-resource model so multiple clients can subscribe to a run
+and reconnect with replay.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
-import uuid
-from typing import AsyncIterator, Awaitable, Callable
 
 try:
     from starlette.applications import Starlette
     from starlette.requests import Request
-    from starlette.responses import JSONResponse, StreamingResponse
+    from starlette.responses import JSONResponse, Response, StreamingResponse
     from starlette.routing import Route
 except ImportError as exc:  # pragma: no cover - import-time guard
     raise ImportError(
@@ -24,64 +31,82 @@ except ImportError as exc:  # pragma: no cover - import-time guard
         "pip install 'codagent[server]'"
     ) from exc
 
-
-# An async-generator callable: takes the parsed JSON body, yields token
-# strings. Must respect asyncio.CancelledError to participate in cancel
-# propagation when the client disconnects.
-LLMCall = Callable[[dict], AsyncIterator[str]]
-
-
-def _sse(event: str, data: dict | str) -> str:
-    payload = data if isinstance(data, str) else json.dumps(data)
-    return f"event: {event}\ndata: {payload}\n\n"
+from codagent.server.runs import (
+    AgentRun,
+    InMemoryRunRegistry,
+    LLMCall,
+    RunEvent,
+    RunRegistry,
+)
 
 
-async def _run_stream(
+def _format_sse(event: RunEvent) -> str:
+    payload = json.dumps(event.data) if isinstance(event.data, dict) else str(event.data)
+    return f"id: {event.id}\nevent: {event.name}\ndata: {payload}\n\n"
+
+
+def create_app(
+    *,
     llm_call: LLMCall,
-    body: dict,
-    is_disconnected: Callable[[], Awaitable[bool]],
-) -> AsyncIterator[str]:
-    """Core SSE event generator. Pulled out for direct testability.
+    registry: RunRegistry | None = None,
+) -> Starlette:
+    """Build a Starlette app exposing the run-as-resource API."""
 
-    Yields raw SSE-formatted strings. Polls ``is_disconnected`` between
-    tokens; on disconnect, emits ``run.cancelled`` and returns, which
-    closes the underlying ``llm_call`` async generator.
-    """
-    run_id = str(uuid.uuid4())
-    yield _sse("run.started", {"run_id": run_id})
-    agen = llm_call(body)
-    try:
-        async for token in agen:
-            if await is_disconnected():
-                yield _sse("run.cancelled", {"run_id": run_id})
-                return
-            yield _sse("token", {"text": token})
-        yield _sse("run.done", {"run_id": run_id})
-    finally:
-        aclose = getattr(agen, "aclose", None)
-        if aclose is not None:
-            await aclose()
+    reg: RunRegistry = registry if registry is not None else InMemoryRunRegistry()
 
-
-def create_app(*, llm_call: LLMCall) -> Starlette:
-    """Build a Starlette app that serves the given LLM callable.
-
-    The app exposes:
-
-    - ``POST /v1/runs`` — body JSON is passed to ``llm_call``; tokens
-      stream back as SSE ``token`` events. Emits ``run.started`` first
-      and ``run.done`` (or ``run.cancelled``) last.
-    - ``GET /healthz`` — returns ``{"ok": true}``.
-    """
-
-    async def create_run(request: Request) -> StreamingResponse:
+    async def create_run(request: Request) -> Response:
         try:
             body = await request.json()
         except json.JSONDecodeError:
             return JSONResponse({"error": "body must be JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+        run = reg.create_run(llm_call, body)
+        return JSONResponse(
+            {"run_id": run.id, "status": run.status},
+            status_code=201,
+        )
+
+    async def get_run(request: Request) -> Response:
+        run_id = request.path_params["id"]
+        run = reg.get(run_id)
+        if run is None:
+            return JSONResponse({"error": "run not found"}, status_code=404)
+        return JSONResponse(run.snapshot())
+
+    async def cancel_run(request: Request) -> Response:
+        run_id = request.path_params["id"]
+        run = reg.get(run_id)
+        if run is None:
+            return JSONResponse({"error": "run not found"}, status_code=404)
+        run.request_cancel()
+        # Wait briefly for the runner to honour the cancel so the response
+        # status reflects the actual run state and any subscriber attached
+        # immediately after sees the run.cancelled event in the backlog.
+        task = run._task
+        if task is not None:
+            loop = asyncio.get_event_loop()
+            deadline = loop.time() + 1.0
+            while not task.done() and loop.time() < deadline:
+                await asyncio.sleep(0.005)
+        return JSONResponse({"run_id": run.id, "status": run.status})
+
+    async def stream_events(request: Request) -> Response:
+        run_id = request.path_params["id"]
+        run = reg.get(run_id)
+        if run is None:
+            return JSONResponse({"error": "run not found"}, status_code=404)
+        try:
+            last_event_id = int(request.headers.get("last-event-id", "0"))
+        except ValueError:
+            last_event_id = 0
+
+        async def gen():
+            async for event in run.subscribe(last_event_id=last_event_id):
+                yield _format_sse(event)
 
         return StreamingResponse(
-            _run_stream(llm_call, body, request.is_disconnected),
+            gen(),
             media_type="text/event-stream",
             headers={"cache-control": "no-cache", "x-accel-buffering": "no"},
         )
@@ -92,6 +117,13 @@ def create_app(*, llm_call: LLMCall) -> Starlette:
     return Starlette(
         routes=[
             Route("/v1/runs", create_run, methods=["POST"]),
+            Route("/v1/runs/{id}", get_run, methods=["GET"]),
+            Route("/v1/runs/{id}/cancel", cancel_run, methods=["POST"]),
+            Route("/v1/runs/{id}/events", stream_events, methods=["GET"]),
             Route("/healthz", healthz, methods=["GET"]),
         ]
     )
+
+
+# Re-export the AgentRun type for convenience.
+__all__ = ["create_app", "AgentRun"]
