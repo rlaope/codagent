@@ -31,6 +31,8 @@ except ImportError as exc:  # pragma: no cover - import-time guard
         "pip install 'codagent[server]'"
     ) from exc
 
+from codagent.harness._abc import Contract
+from codagent.harness._harness import Harness
 from codagent.server.runs import (
     AgentRun,
     InMemoryRunRegistry,
@@ -49,10 +51,22 @@ def create_app(
     *,
     llm_call: LLMCall,
     registry: RunRegistry | None = None,
+    contracts: list[Contract] | None = None,
 ) -> Starlette:
-    """Build a Starlette app exposing the run-as-resource API."""
+    """Build a Starlette app exposing the run-as-resource API.
 
-    reg: RunRegistry = registry if registry is not None else InMemoryRunRegistry()
+    When ``contracts`` are provided, the harness ``system_addendum()`` is
+    exposed to the LLM callable via ``body["_codagent_addendum"]`` and
+    every naturally-completing run is validated against the harness.
+    Failures emit a ``run.contract_failed`` event with the per-contract
+    violations.
+    """
+
+    if registry is not None:
+        reg: RunRegistry = registry
+    else:
+        harness = Harness(list(contracts)) if contracts else None
+        reg = InMemoryRunRegistry(harness=harness)
 
     async def create_run(request: Request) -> Response:
         try:

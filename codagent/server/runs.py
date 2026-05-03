@@ -19,7 +19,10 @@ import asyncio
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import AsyncGenerator, AsyncIterator, Callable, Protocol
+from typing import TYPE_CHECKING, AsyncGenerator, AsyncIterator, Callable, Protocol
+
+if TYPE_CHECKING:
+    from codagent.harness._harness import Harness
 
 
 LLMCall = Callable[[dict], AsyncIterator[str]]
@@ -149,17 +152,28 @@ class AgentRun:
         }
 
 
-async def run_task(run: AgentRun, llm_call: LLMCall, body: dict) -> None:
+async def run_task(
+    run: AgentRun,
+    llm_call: LLMCall,
+    body: dict,
+    harness: "Harness | None" = None,
+) -> None:
     """Background task body: drive an :data:`LLMCall` and publish events.
 
     Always publishes exactly one terminal event (``run.done``,
-    ``run.cancelled`` or ``run.failed``) and calls
-    :meth:`AgentRun.mark_done` so subscribers exit cleanly. Cooperative
-    cancellation: callers set ``run.cancel_requested`` and the runner
-    exits between tokens so the upstream async generator's ``finally``
-    block runs naturally.
+    ``run.cancelled``, ``run.failed`` or ``run.contract_failed``) and
+    calls :meth:`AgentRun.mark_done` so subscribers exit cleanly.
+    Cooperative cancellation: callers set ``run.cancel_requested`` and
+    the runner exits between tokens so the upstream async generator's
+    ``finally`` block runs naturally.
+
+    When ``harness`` is provided, contracts run on the concatenated
+    token output **only** if the run completed naturally (not on cancel
+    or upstream exception). Failure emits ``run.contract_failed`` with
+    a list of violations; success emits ``run.done`` as usual.
     """
     failed: str | None = None
+    accumulated: list[str] = []
     try:
         run.status = "running"
         await run.publish("run.started", {"run_id": run.id})
@@ -169,6 +183,7 @@ async def run_task(run: AgentRun, llm_call: LLMCall, body: dict) -> None:
             async for token in agen:
                 if run.cancel_requested:
                     break
+                accumulated.append(token)
                 await run.publish("token", {"text": token})
         finally:
             aclose = getattr(agen, "aclose", None)
@@ -198,11 +213,31 @@ async def run_task(run: AgentRun, llm_call: LLMCall, body: dict) -> None:
         run.status = "cancelled"
         await run.publish("run.cancelled", {"run_id": run.id})
     else:
-        run.status = "completed"
-        await run.publish("run.done", {"run_id": run.id})
+        violations = _validate_with_harness(harness, "".join(accumulated))
+        if violations:
+            run.status = "failed"
+            await run.publish(
+                "run.contract_failed",
+                {"run_id": run.id, "violations": violations},
+            )
+        else:
+            run.status = "completed"
+            await run.publish("run.done", {"run_id": run.id})
 
     run.finished_at = time.time()
     await run.mark_done()
+
+
+def _validate_with_harness(harness, response: str) -> list[dict]:
+    """Run ``harness.validate`` on the response. Return list of violations."""
+    if harness is None or not harness.contracts:
+        return []
+    results = harness.validate(response)
+    return [
+        {"contract": name, "message": payload.get("reason") or ""}
+        for name, payload in results.items()
+        if name != "all_ok" and isinstance(payload, dict) and not payload.get("ok")
+    ]
 
 
 class RunRegistry(Protocol):
@@ -219,14 +254,27 @@ class RunRegistry(Protocol):
 
 
 class InMemoryRunRegistry:
-    """Process-local run registry."""
+    """Process-local run registry.
 
-    def __init__(self) -> None:
+    Accepts an optional :class:`Harness` whose contracts are validated
+    against the run's accumulated output on natural completion. The
+    harness's ``system_addendum()`` is exposed to ``llm_call`` via
+    ``body["_codagent_addendum"]`` so the run code can prepend it to
+    its prompt.
+    """
+
+    def __init__(self, harness: "Harness | None" = None) -> None:
         self._runs: dict[str, AgentRun] = {}
+        self._harness = harness
 
     def create_run(self, llm_call: LLMCall, body: dict) -> AgentRun:
+        if self._harness is not None and self._harness.contracts:
+            body = dict(body)
+            body["_codagent_addendum"] = self._harness.system_addendum()
         run = AgentRun(id=str(uuid.uuid4()))
-        run._task = asyncio.create_task(run_task(run, llm_call, body))
+        run._task = asyncio.create_task(
+            run_task(run, llm_call, body, harness=self._harness)
+        )
         self._runs[run.id] = run
         return run
 
