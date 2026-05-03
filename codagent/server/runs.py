@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, AsyncGenerator, AsyncIterator, Callable, Proto
 if TYPE_CHECKING:
     from codagent.harness._harness import Harness
     from codagent.server.budgets import BudgetGate
+    from codagent.server.metrics import Metrics
     from codagent.server.middleware import RunMiddleware
     from codagent.server.stores import RunStore
 
@@ -76,6 +77,12 @@ class AgentRun:
     _done: asyncio.Event | None = field(default=None, repr=False)
     _task: asyncio.Task | None = field(default=None, repr=False)
     _middleware: "list[RunMiddleware]" = field(default_factory=list, repr=False)
+    # Backpressure: per-subscriber queue limit. 0 = unbounded.
+    max_queue_size: int = 0
+    # Eviction: cap on retained event history. 0 = unbounded.
+    max_events: int = 0
+    # Counter exposed for tests/metrics; bumped on subscriber-queue-full drops.
+    _dropped_events: int = 0
 
     # asyncio primitives bind to the running loop; create them lazily.
     def _ensure_async_state(self) -> None:
@@ -98,8 +105,26 @@ class AgentRun:
             self._next_id += 1
             event = RunEvent(id=self._next_id, name=name, data=dict(data))
             self._events.append(event)
+            if self.max_events and len(self._events) > self.max_events:
+                # Drop the oldest event from history. Subscribers that
+                # reconnect with a Last-Event-Id older than the new
+                # window will skip the evicted events; replay only sees
+                # what's still retained.
+                self._events.pop(0)
             for queue in list(self._subscribers):
-                queue.put_nowait(event)
+                try:
+                    queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    # Backpressure policy: drop the oldest queued event
+                    # for this subscriber and put the new one. Slow
+                    # subscribers may miss intermediate events but are
+                    # not blocked, and producers never stall.
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                    queue.put_nowait(event)
+                    self._dropped_events += 1
         for mw in self._middleware:
             try:
                 await mw.after_event(self, event)
@@ -120,13 +145,33 @@ class AgentRun:
         self._ensure_async_state()
         assert self._lock is not None and self._done is not None
 
-        queue: asyncio.Queue = asyncio.Queue()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=self.max_queue_size)
         async with self._lock:
             for event in self._events:
                 if event.id > last_event_id:
-                    queue.put_nowait(event)
+                    try:
+                        queue.put_nowait(event)
+                    except asyncio.QueueFull:
+                        # Same drop-oldest backpressure as live publish:
+                        # if the backlog is larger than the bound, the
+                        # subscriber sees only the most recent
+                        # max_queue_size events.
+                        try:
+                            queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            pass
+                        queue.put_nowait(event)
             if self._done.is_set():
-                queue.put_nowait(_SENTINEL)
+                # Same drop-oldest policy: terminal sentinel must always
+                # land or the subscriber generator hangs.
+                try:
+                    queue.put_nowait(_SENTINEL)
+                except asyncio.QueueFull:
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                    queue.put_nowait(_SENTINEL)
             else:
                 self._subscribers.append(queue)
         try:
@@ -147,7 +192,17 @@ class AgentRun:
         async with self._lock:
             self._done.set()
             for queue in list(self._subscribers):
-                queue.put_nowait(_SENTINEL)
+                # The sentinel must always reach the subscriber so the
+                # generator returns; if the queue is full, evict to
+                # make room.
+                try:
+                    queue.put_nowait(_SENTINEL)
+                except asyncio.QueueFull:
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                    queue.put_nowait(_SENTINEL)
             self._subscribers.clear()
 
     def request_cancel(self) -> None:
@@ -328,16 +383,26 @@ class InMemoryRunRegistry:
         budget_gate: "BudgetGate | None" = None,
         middleware: "list[RunMiddleware] | None" = None,
         run_store: "RunStore | None" = None,
+        metrics: "Metrics | None" = None,
+        max_queue_size: int = 0,
+        max_events: int = 0,
     ) -> None:
         self._runs: dict[str, AgentRun] = {}
         self._harness = harness
         self._budget_gate = budget_gate
         self._middleware = list(middleware) if middleware else []
         self._run_store = run_store
+        self._metrics = metrics
+        self._max_queue_size = max_queue_size
+        self._max_events = max_events
         if run_store is not None:
             from codagent.server.stores import _RunStoreMirror
 
             self._middleware.append(_RunStoreMirror(run_store))
+        if metrics is not None:
+            from codagent.server.metrics import _MetricsMiddleware
+
+            self._middleware.append(_MetricsMiddleware(metrics))
 
     def create_run(
         self, llm_call: LLMCall, body: dict, *, user_id: str = ""
@@ -345,7 +410,11 @@ class InMemoryRunRegistry:
         if self._harness is not None and self._harness.contracts:
             body = dict(body)
             body["_codagent_addendum"] = self._harness.system_addendum()
-        run = AgentRun(id=str(uuid.uuid4()))
+        run = AgentRun(
+            id=str(uuid.uuid4()),
+            max_queue_size=self._max_queue_size,
+            max_events=self._max_events,
+        )
         run._task = asyncio.create_task(
             run_task(
                 run,
@@ -362,3 +431,20 @@ class InMemoryRunRegistry:
 
     def get(self, run_id: str) -> AgentRun | None:
         return self._runs.get(run_id)
+
+    def in_flight(self) -> "list[AgentRun]":
+        return [r for r in self._runs.values() if r._task and not r._task.done()]
+
+    async def shutdown(self, timeout: float | None = None) -> None:
+        """Wait for in-flight runs to terminate.
+
+        Called from the ASGI lifespan ``shutdown`` event so a SIGTERM
+        gives every active run a chance to publish its terminal event
+        and let subscribers drain. Pass ``timeout`` to bound the wait;
+        a hung run will then be left behind (its task is not cancelled
+        here — escalating to cancel is the caller's choice).
+        """
+        tasks = [r._task for r in self.in_flight() if r._task is not None]
+        if not tasks:
+            return
+        await asyncio.wait(tasks, timeout=timeout)

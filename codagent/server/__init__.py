@@ -33,6 +33,7 @@ Then::
 
 from codagent.server.agents import Agent
 from codagent.server.app import CodagentApp, create_app
+from codagent.server.metrics import InMemoryMetrics, Metrics
 from codagent.server.middleware import RunMiddleware
 from codagent.server.stores import (
     BudgetStore,
@@ -50,4 +51,6 @@ __all__ = [
     "BudgetStore",
     "InMemoryRunStore",
     "InMemoryBudgetStore",
+    "Metrics",
+    "InMemoryMetrics",
 ]

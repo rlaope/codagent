@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 
 try:
     from starlette.applications import Starlette
@@ -37,6 +38,7 @@ from codagent.harness._abc import Contract
 from codagent.harness._harness import Harness
 from codagent.server.agents import Agent
 from codagent.server.budgets import BudgetConfig, BudgetGate
+from codagent.server.metrics import Metrics
 from codagent.server.middleware import RunMiddleware
 from codagent.server.runs import (
     AgentRun,
@@ -69,6 +71,10 @@ def create_app(
     middleware: list[RunMiddleware] | None = None,
     run_store: RunStore | None = None,
     budget_store: BudgetStore | None = None,
+    metrics: Metrics | None = None,
+    max_queue_size: int = 0,
+    max_events: int = 0,
+    shutdown_timeout: float | None = None,
 ) -> Starlette:
     """Build a Starlette app exposing the run-as-resource API.
 
@@ -101,6 +107,9 @@ def create_app(
             budget_gate=budget_gate,
             middleware=list(middleware) if middleware else None,
             run_store=run_store,
+            metrics=metrics,
+            max_queue_size=max_queue_size,
+            max_events=max_events,
         )
     sessions: SessionStore = session_store if session_store is not None else InMemorySessionStore()
     identify_fn: Callable[["Request"], str] = identify if identify is not None else _default_identify
@@ -181,6 +190,17 @@ def create_app(
     async def healthz(_: Request) -> JSONResponse:
         return JSONResponse({"ok": True})
 
+    @asynccontextmanager
+    async def lifespan(_app):
+        try:
+            yield
+        finally:
+            # Graceful shutdown: wait for any in-flight runs so each
+            # one publishes its terminal event and subscribers drain.
+            shutdown = getattr(reg, "shutdown", None)
+            if callable(shutdown):
+                await shutdown(timeout=shutdown_timeout)
+
     return Starlette(
         routes=[
             Route("/v1/runs", create_run, methods=["POST"]),
@@ -190,7 +210,8 @@ def create_app(
             Route("/v1/sessions", create_session, methods=["POST"]),
             Route("/v1/sessions/{id}/runs", list_session_runs, methods=["GET"]),
             Route("/healthz", healthz, methods=["GET"]),
-        ]
+        ],
+        lifespan=lifespan,
     )
 
 
@@ -230,6 +251,10 @@ class CodagentApp:
         identify: Callable[["Request"], str] | None = None,
         run_store: RunStore | None = None,
         budget_store: BudgetStore | None = None,
+        metrics: Metrics | None = None,
+        max_queue_size: int = 0,
+        max_events: int = 0,
+        shutdown_timeout: float | None = None,
     ) -> None:
         if isinstance(agent, Agent):
             self._llm_call: LLMCall = agent.run
@@ -248,6 +273,10 @@ class CodagentApp:
         self._identify = identify
         self._run_store = run_store
         self._budget_store = budget_store
+        self._metrics = metrics
+        self._max_queue_size = max_queue_size
+        self._max_events = max_events
+        self._shutdown_timeout = shutdown_timeout
         self._asgi: Starlette | None = None
 
     def add_middleware(self, mw: RunMiddleware) -> RunMiddleware:
@@ -279,6 +308,10 @@ class CodagentApp:
                 identify=self._identify,
                 run_store=self._run_store,
                 budget_store=self._budget_store,
+                metrics=self._metrics,
+                max_queue_size=self._max_queue_size,
+                max_events=self._max_events,
+                shutdown_timeout=self._shutdown_timeout,
             )
         return self._asgi
 
