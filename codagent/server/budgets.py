@@ -20,13 +20,31 @@ from codagent.observability.cost import MODEL_PRICES
 
 @dataclass
 class BudgetConfig:
-    """Per-user limits. Any field set to ``None`` is unenforced."""
+    """Per-user limits. Any field set to ``None`` is unenforced.
+
+    ``max_steps`` counts each emitted output chunk (one token = one
+    step in the streaming model). It is tracked separately from
+    ``output_tokens`` so it can carry a different ceiling, but for a
+    plain string-yielding ``LLMCall`` the two are equivalent.
+
+    ``max_usd`` requires ``model`` to be set; cost is computed from
+    ``codagent.observability.cost.MODEL_PRICES``. Setting ``max_usd``
+    without ``model`` raises ``ValueError`` so a misconfigured limit
+    fails fast instead of being silently ignored.
+    """
 
     input_tokens: int | None = None
     output_tokens: int | None = None
     max_usd: float | None = None
     max_steps: int | None = None
     model: str | None = None  # used for USD computation
+
+    def __post_init__(self) -> None:
+        if self.max_usd is not None and not self.model:
+            raise ValueError(
+                "BudgetConfig.max_usd requires model to be set "
+                "(USD is computed from MODEL_PRICES[model])"
+            )
 
 
 class BudgetGate:
@@ -67,6 +85,9 @@ class BudgetGate:
             s["output_tokens"] += count
         elif kind == "input":
             s["input_tokens"] += count
+        # In the streaming model, each emitted chunk is a "step"; tracked
+        # separately from output_tokens so callers can apply different
+        # ceilings if they want.
         s["steps"] += count
         model = self.config.model
         if model and model in MODEL_PRICES:

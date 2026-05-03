@@ -49,6 +49,17 @@ def test_budget_gate_max_steps_independent_of_tokens():
     assert v["limit"] == "steps"
 
 
+def test_budget_config_max_usd_without_model_raises():
+    """Misconfiguration must fail fast — silent no-op leaves the limit
+    unenforced, which is worse than a noisy refusal."""
+    with pytest.raises(ValueError, match="model"):
+        BudgetConfig(max_usd=5.0)
+    # max_usd with model is fine.
+    BudgetConfig(max_usd=5.0, model="gpt-4o")
+    # No max_usd, no model — fine.
+    BudgetConfig(output_tokens=100)
+
+
 # -- HTTP-level enforcement --------------------------------------------------
 
 

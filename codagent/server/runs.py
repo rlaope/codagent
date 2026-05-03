@@ -214,7 +214,14 @@ async def run_task(
                         pass
 
     except asyncio.CancelledError:
-        # External hard-cancel: treat as a cooperative cancel for cleanup.
+        # External hard-cancel (e.g. test harness tearing down a request
+        # task whose scope spawned us). We treat it as a cooperative
+        # cancel and let the rest of the function publish the terminal
+        # event + mark_done so subscribers always see end-of-stream.
+        # current_task().uncancel() resets the cancel state so the
+        # subsequent awaits don't immediately re-raise CancelledError;
+        # without it, cleanup would silently abort and subscribers would
+        # hang. (Python 3.11+ adds uncancel(); older versions skip.)
         run._cancel_requested = True
         current = asyncio.current_task()
         if current is not None:
