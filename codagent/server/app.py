@@ -35,7 +35,9 @@ from typing import Callable
 
 from codagent.harness._abc import Contract
 from codagent.harness._harness import Harness
+from codagent.server.agents import Agent
 from codagent.server.budgets import BudgetConfig, BudgetGate
+from codagent.server.middleware import RunMiddleware
 from codagent.server.runs import (
     AgentRun,
     InMemoryRunRegistry,
@@ -63,6 +65,7 @@ def create_app(
     session_store: SessionStore | None = None,
     budget: BudgetConfig | None = None,
     identify: Callable[["Request"], str] | None = None,
+    middleware: list[RunMiddleware] | None = None,
 ) -> Starlette:
     """Build a Starlette app exposing the run-as-resource API.
 
@@ -78,6 +81,9 @@ def create_app(
     - ``identify`` — Callable[[Request], str] mapping each request to a
       user id. Default: read the ``x-codagent-user`` header, fall back
       to ``"anonymous"``.
+    - ``middleware`` — list of :class:`RunMiddleware` instances; their
+      ``before_run`` / ``after_event`` / ``after_run`` hooks fire on
+      every run.
     """
 
     budget_gate: BudgetGate | None = BudgetGate(budget) if budget is not None else None
@@ -85,7 +91,11 @@ def create_app(
         reg: RunRegistry = registry
     else:
         harness = Harness(list(contracts)) if contracts else None
-        reg = InMemoryRunRegistry(harness=harness, budget_gate=budget_gate)
+        reg = InMemoryRunRegistry(
+            harness=harness,
+            budget_gate=budget_gate,
+            middleware=list(middleware) if middleware else None,
+        )
     sessions: SessionStore = session_store if session_store is not None else InMemorySessionStore()
     identify_fn: Callable[["Request"], str] = identify if identify is not None else _default_identify
 
@@ -178,5 +188,91 @@ def create_app(
     )
 
 
+class CodagentApp:
+    """Class-style face for the codagent agent server.
+
+    Wraps :func:`create_app` with decorator-style middleware
+    registration and a stable ``__call__`` so the instance itself is
+    directly mountable as an ASGI application::
+
+        app = CodagentApp(MyAgent())
+
+        @app.middleware
+        class Audit(RunMiddleware): ...
+
+        # uvicorn module:app
+
+    Accepts either an :class:`Agent` instance or a plain ``LLMCall``
+    callable. When given an :class:`Agent`, the agent's class-level
+    ``contracts`` and ``middleware`` lists are picked up automatically
+    and merged with anything passed at the app level.
+
+    The underlying Starlette app is built lazily on first ASGI call so
+    middleware registered via the decorator after construction is
+    included.
+    """
+
+    def __init__(
+        self,
+        agent: "Agent | LLMCall",
+        *,
+        contracts: list[Contract] | None = None,
+        middleware: list[RunMiddleware] | None = None,
+        registry: RunRegistry | None = None,
+        session_store: SessionStore | None = None,
+        budget: BudgetConfig | None = None,
+        identify: Callable[["Request"], str] | None = None,
+    ) -> None:
+        if isinstance(agent, Agent):
+            self._llm_call: LLMCall = agent.run
+            agent_contracts = list(agent.contracts)
+            agent_middleware = list(agent.middleware)
+        else:
+            self._llm_call = agent
+            agent_contracts = []
+            agent_middleware = []
+
+        self._contracts = list(contracts or []) + agent_contracts
+        self._middleware = list(middleware or []) + agent_middleware
+        self._registry = registry
+        self._session_store = session_store
+        self._budget = budget
+        self._identify = identify
+        self._asgi: Starlette | None = None
+
+    def add_middleware(self, mw: RunMiddleware) -> RunMiddleware:
+        """Append a middleware instance. Must be called before the app is built."""
+        if self._asgi is not None:
+            raise RuntimeError(
+                "middleware must be registered before the first ASGI request"
+            )
+        self._middleware.append(mw)
+        return mw
+
+    def middleware(self, mw_or_cls):
+        """Decorator: register a middleware class or instance."""
+        if isinstance(mw_or_cls, type):
+            self.add_middleware(mw_or_cls())
+        else:
+            self.add_middleware(mw_or_cls)
+        return mw_or_cls
+
+    def build(self) -> Starlette:
+        if self._asgi is None:
+            self._asgi = create_app(
+                llm_call=self._llm_call,
+                contracts=self._contracts or None,
+                middleware=self._middleware or None,
+                registry=self._registry,
+                session_store=self._session_store,
+                budget=self._budget,
+                identify=self._identify,
+            )
+        return self._asgi
+
+    async def __call__(self, scope, receive, send) -> None:
+        await self.build()(scope, receive, send)
+
+
 # Re-export the AgentRun type for convenience.
-__all__ = ["create_app", "AgentRun"]
+__all__ = ["create_app", "AgentRun", "CodagentApp"]

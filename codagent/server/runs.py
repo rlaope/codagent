@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, AsyncGenerator, AsyncIterator, Callable, Proto
 if TYPE_CHECKING:
     from codagent.harness._harness import Harness
     from codagent.server.budgets import BudgetGate
+    from codagent.server.middleware import RunMiddleware
 
 
 LLMCall = Callable[[dict], AsyncIterator[str]]
@@ -73,6 +74,7 @@ class AgentRun:
     _lock: asyncio.Lock | None = field(default=None, repr=False)
     _done: asyncio.Event | None = field(default=None, repr=False)
     _task: asyncio.Task | None = field(default=None, repr=False)
+    _middleware: "list[RunMiddleware]" = field(default_factory=list, repr=False)
 
     # asyncio primitives bind to the running loop; create them lazily.
     def _ensure_async_state(self) -> None:
@@ -82,7 +84,13 @@ class AgentRun:
             self._done = asyncio.Event()
 
     async def publish(self, name: str, data: dict) -> RunEvent:
-        """Append an event to history and broadcast it to all subscribers."""
+        """Append an event to history and broadcast it to all subscribers.
+
+        After the event is recorded and queued, ``after_event`` hooks on
+        any registered middleware fire (outside the lock so a middleware
+        re-entering :meth:`publish` doesn't deadlock). Hook errors are
+        swallowed.
+        """
         self._ensure_async_state()
         assert self._lock is not None
         async with self._lock:
@@ -91,6 +99,11 @@ class AgentRun:
             self._events.append(event)
             for queue in list(self._subscribers):
                 queue.put_nowait(event)
+        for mw in self._middleware:
+            try:
+                await mw.after_event(self, event)
+            except Exception:
+                pass
         return event
 
     async def subscribe(
@@ -160,6 +173,7 @@ async def run_task(
     harness: "Harness | None" = None,
     budget_gate: "BudgetGate | None" = None,
     user_id: str = "",
+    middleware: "list[RunMiddleware] | None" = None,
 ) -> None:
     """Background task body: drive an :data:`LLMCall` and publish events.
 
@@ -178,7 +192,13 @@ async def run_task(
     failed: str | None = None
     accumulated: list[str] = []
     budget_violation: dict | None = None
+    if middleware is not None:
+        run._middleware = list(middleware)
     try:
+        # before_run runs first so middleware can mutate `body` before
+        # the LLM call sees it. A raise here aborts the run cleanly.
+        for mw in run._middleware:
+            await mw.before_run(run, body)
         run.status = "running"
         await run.publish("run.started", {"run_id": run.id})
 
@@ -258,6 +278,12 @@ async def run_task(
     run.finished_at = time.time()
     await run.mark_done()
 
+    for mw in run._middleware:
+        try:
+            await mw.after_run(run)
+        except Exception:
+            pass
+
 
 def _validate_with_harness(harness, response: str) -> list[dict]:
     """Run ``harness.validate`` on the response. Return list of violations."""
@@ -299,10 +325,12 @@ class InMemoryRunRegistry:
         self,
         harness: "Harness | None" = None,
         budget_gate: "BudgetGate | None" = None,
+        middleware: "list[RunMiddleware] | None" = None,
     ) -> None:
         self._runs: dict[str, AgentRun] = {}
         self._harness = harness
         self._budget_gate = budget_gate
+        self._middleware = list(middleware) if middleware else []
 
     def create_run(
         self, llm_call: LLMCall, body: dict, *, user_id: str = ""
@@ -319,6 +347,7 @@ class InMemoryRunRegistry:
                 harness=self._harness,
                 budget_gate=self._budget_gate,
                 user_id=user_id,
+                middleware=self._middleware,
             )
         )
         self._runs[run.id] = run
