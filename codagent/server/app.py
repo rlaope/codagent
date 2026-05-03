@@ -23,6 +23,7 @@ from contextlib import asynccontextmanager
 
 try:
     from starlette.applications import Starlette
+    from starlette.middleware import Middleware
     from starlette.requests import Request
     from starlette.responses import JSONResponse, Response, StreamingResponse
     from starlette.routing import Route
@@ -75,6 +76,8 @@ def create_app(
     max_queue_size: int = 0,
     max_events: int = 0,
     shutdown_timeout: float | None = None,
+    extra_routes: list[Route] | None = None,
+    http_middleware: list[Middleware] | None = None,
 ) -> Starlette:
     """Build a Starlette app exposing the run-as-resource API.
 
@@ -201,17 +204,22 @@ def create_app(
             if callable(shutdown):
                 await shutdown(timeout=shutdown_timeout)
 
+    routes: list[Route] = [
+        Route("/v1/runs", create_run, methods=["POST"]),
+        Route("/v1/runs/{id}", get_run, methods=["GET"]),
+        Route("/v1/runs/{id}/cancel", cancel_run, methods=["POST"]),
+        Route("/v1/runs/{id}/events", stream_events, methods=["GET"]),
+        Route("/v1/sessions", create_session, methods=["POST"]),
+        Route("/v1/sessions/{id}/runs", list_session_runs, methods=["GET"]),
+        Route("/healthz", healthz, methods=["GET"]),
+    ]
+    if extra_routes:
+        routes.extend(extra_routes)
+
     return Starlette(
-        routes=[
-            Route("/v1/runs", create_run, methods=["POST"]),
-            Route("/v1/runs/{id}", get_run, methods=["GET"]),
-            Route("/v1/runs/{id}/cancel", cancel_run, methods=["POST"]),
-            Route("/v1/runs/{id}/events", stream_events, methods=["GET"]),
-            Route("/v1/sessions", create_session, methods=["POST"]),
-            Route("/v1/sessions/{id}/runs", list_session_runs, methods=["GET"]),
-            Route("/healthz", healthz, methods=["GET"]),
-        ],
+        routes=routes,
         lifespan=lifespan,
+        middleware=list(http_middleware) if http_middleware else None,
     )
 
 
@@ -277,6 +285,8 @@ class CodagentApp:
         self._max_queue_size = max_queue_size
         self._max_events = max_events
         self._shutdown_timeout = shutdown_timeout
+        self._extra_routes: list[Route] = []
+        self._http_middleware: list[Middleware] = []
         self._asgi: Starlette | None = None
 
     def add_middleware(self, mw: RunMiddleware) -> RunMiddleware:
@@ -296,6 +306,83 @@ class CodagentApp:
             self.add_middleware(mw_or_cls)
         return mw_or_cls
 
+    # -- Function-style hook decorators --------------------------------------
+
+    def before_run(self, fn):
+        """Decorator: register an async function as a ``before_run`` hook.
+
+        The function receives ``(run, body)`` and may mutate ``body`` in
+        place. A raise aborts the run with ``run.failed``.
+        """
+        outer = fn
+
+        class _Wrap(RunMiddleware):
+            async def before_run(self, run, body):
+                await outer(run, body)
+
+        self.add_middleware(_Wrap())
+        return fn
+
+    def after_event(self, fn):
+        """Decorator: register an async function as an ``after_event`` hook.
+
+        The function receives ``(run, event)`` and is called per event.
+        Errors are swallowed.
+        """
+        outer = fn
+
+        class _Wrap(RunMiddleware):
+            async def after_event(self, run, event):
+                await outer(run, event)
+
+        self.add_middleware(_Wrap())
+        return fn
+
+    def after_run(self, fn):
+        """Decorator: register an async function as an ``after_run`` hook.
+
+        The function receives ``(run,)`` once after the terminal event.
+        Errors are swallowed.
+        """
+        outer = fn
+
+        class _Wrap(RunMiddleware):
+            async def after_run(self, run):
+                await outer(run)
+
+        self.add_middleware(_Wrap())
+        return fn
+
+    # -- HTTP-level extension points -----------------------------------------
+
+    def route(self, path: str, methods: list[str] | tuple[str, ...] = ("GET",)):
+        """Decorator: register a custom Starlette HTTP route on the app.
+
+        The handler is a normal ``async def handler(request) -> Response``
+        — full Starlette semantics, no codagent-specific wrapper.
+        Routes registered here are mounted alongside the built-in
+        ``/v1/...`` and ``/healthz`` routes.
+        """
+        if self._asgi is not None:
+            raise RuntimeError("routes must be registered before the first ASGI request")
+
+        def decorator(fn):
+            self._extra_routes.append(Route(path, fn, methods=list(methods)))
+            return fn
+
+        return decorator
+
+    def add_http_middleware(self, mw_cls, **kwargs) -> None:
+        """Register a Starlette HTTP-level middleware class.
+
+        Passed through to ``Starlette(middleware=[Middleware(cls, **kwargs)])``.
+        For run-level hooks (``before_run``/``after_event``/``after_run``)
+        use :class:`RunMiddleware` or the matching decorators instead.
+        """
+        if self._asgi is not None:
+            raise RuntimeError("middleware must be registered before the first ASGI request")
+        self._http_middleware.append(Middleware(mw_cls, **kwargs))
+
     def build(self) -> Starlette:
         if self._asgi is None:
             self._asgi = create_app(
@@ -312,6 +399,8 @@ class CodagentApp:
                 max_queue_size=self._max_queue_size,
                 max_events=self._max_events,
                 shutdown_timeout=self._shutdown_timeout,
+                extra_routes=self._extra_routes or None,
+                http_middleware=self._http_middleware or None,
             )
         return self._asgi
 
