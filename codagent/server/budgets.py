@@ -14,8 +14,12 @@ emitting ``run.done``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from codagent.observability.cost import MODEL_PRICES
+
+if TYPE_CHECKING:
+    from codagent.server.stores import BudgetStore
 
 
 @dataclass
@@ -56,18 +60,18 @@ class BudgetGate:
     :meth:`record_token` accumulates after a token is emitted.
     """
 
-    def __init__(self, config: BudgetConfig) -> None:
-        self.config = config
-        self._state: dict[str, dict] = {}
+    def __init__(
+        self,
+        config: BudgetConfig,
+        store: "BudgetStore | None" = None,
+    ) -> None:
+        from codagent.server.stores import InMemoryBudgetStore
 
-    def _state_for(self, user_id: str) -> dict:
-        return self._state.setdefault(
-            user_id,
-            {"input_tokens": 0, "output_tokens": 0, "usd": 0.0, "steps": 0},
-        )
+        self.config = config
+        self._store: "BudgetStore" = store if store is not None else InMemoryBudgetStore()
 
     def check(self, user_id: str) -> dict | None:
-        s = self._state_for(user_id)
+        s = self._store.get(user_id)
         c = self.config
         if c.input_tokens is not None and s["input_tokens"] >= c.input_tokens:
             return {"limit": "input_tokens", "value": s["input_tokens"], "ceiling": c.input_tokens}
@@ -80,7 +84,7 @@ class BudgetGate:
         return None
 
     def record_token(self, user_id: str, kind: str = "output", count: int = 1) -> None:
-        s = self._state_for(user_id)
+        s = self._store.get(user_id)
         if kind == "output":
             s["output_tokens"] += count
         elif kind == "input":
@@ -96,7 +100,8 @@ class BudgetGate:
                 s["usd"] += (count / 1000) * out_price
             elif kind == "input":
                 s["usd"] += (count / 1000) * in_price
+        self._store.set(user_id, s)
 
     def state_of(self, user_id: str) -> dict:
         """Snapshot a user's accumulated usage. Convenience for tests."""
-        return dict(self._state_for(user_id))
+        return self._store.get(user_id)

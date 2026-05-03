@@ -46,6 +46,7 @@ from codagent.server.runs import (
     RunRegistry,
 )
 from codagent.server.sessions import InMemorySessionStore, SessionStore
+from codagent.server.stores import BudgetStore, RunStore
 
 
 def _format_sse(event: RunEvent) -> str:
@@ -66,6 +67,8 @@ def create_app(
     budget: BudgetConfig | None = None,
     identify: Callable[["Request"], str] | None = None,
     middleware: list[RunMiddleware] | None = None,
+    run_store: RunStore | None = None,
+    budget_store: BudgetStore | None = None,
 ) -> Starlette:
     """Build a Starlette app exposing the run-as-resource API.
 
@@ -86,7 +89,9 @@ def create_app(
       every run.
     """
 
-    budget_gate: BudgetGate | None = BudgetGate(budget) if budget is not None else None
+    budget_gate: BudgetGate | None = (
+        BudgetGate(budget, store=budget_store) if budget is not None else None
+    )
     if registry is not None:
         reg: RunRegistry = registry
     else:
@@ -95,6 +100,7 @@ def create_app(
             harness=harness,
             budget_gate=budget_gate,
             middleware=list(middleware) if middleware else None,
+            run_store=run_store,
         )
     sessions: SessionStore = session_store if session_store is not None else InMemorySessionStore()
     identify_fn: Callable[["Request"], str] = identify if identify is not None else _default_identify
@@ -222,6 +228,8 @@ class CodagentApp:
         session_store: SessionStore | None = None,
         budget: BudgetConfig | None = None,
         identify: Callable[["Request"], str] | None = None,
+        run_store: RunStore | None = None,
+        budget_store: BudgetStore | None = None,
     ) -> None:
         if isinstance(agent, Agent):
             self._llm_call: LLMCall = agent.run
@@ -238,6 +246,8 @@ class CodagentApp:
         self._session_store = session_store
         self._budget = budget
         self._identify = identify
+        self._run_store = run_store
+        self._budget_store = budget_store
         self._asgi: Starlette | None = None
 
     def add_middleware(self, mw: RunMiddleware) -> RunMiddleware:
@@ -267,6 +277,8 @@ class CodagentApp:
                 session_store=self._session_store,
                 budget=self._budget,
                 identify=self._identify,
+                run_store=self._run_store,
+                budget_store=self._budget_store,
             )
         return self._asgi
 

@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from codagent.harness._harness import Harness
     from codagent.server.budgets import BudgetGate
     from codagent.server.middleware import RunMiddleware
+    from codagent.server.stores import RunStore
 
 
 LLMCall = Callable[[dict], AsyncIterator[str]]
@@ -326,11 +327,17 @@ class InMemoryRunRegistry:
         harness: "Harness | None" = None,
         budget_gate: "BudgetGate | None" = None,
         middleware: "list[RunMiddleware] | None" = None,
+        run_store: "RunStore | None" = None,
     ) -> None:
         self._runs: dict[str, AgentRun] = {}
         self._harness = harness
         self._budget_gate = budget_gate
         self._middleware = list(middleware) if middleware else []
+        self._run_store = run_store
+        if run_store is not None:
+            from codagent.server.stores import _RunStoreMirror
+
+            self._middleware.append(_RunStoreMirror(run_store))
 
     def create_run(
         self, llm_call: LLMCall, body: dict, *, user_id: str = ""
