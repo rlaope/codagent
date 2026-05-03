@@ -1,21 +1,15 @@
 """codagent CLI entry point.
 
-Usage:
-    codagent install --from <source> [--from <source> ...] \\
-                     --to <target> [--to <target> ...] \\
-                     [--project DIR] [--mode replace|append]
+Subcommands:
+    install     install harness sources to targets (CLAUDE.md, cursor, copilot, agents-md)
+    serve       run the agent-native HTTP server (requires 'server' extra)
 
-Source forms (any markdown rule file):
-    https://...
-    ./CLAUDE.md
-    rlaope/quoted-andrej-karpathy           (resolves to main/CLAUDE.md)
-    rlaope/quoted-andrej-karpathy:AGENTS.md (specific path)
+Examples:
+    codagent install --from ./CLAUDE.md --to claude-code
+    codagent serve myagent:run --port 8000
 
-Target names:
-    claude-code   → CLAUDE.md
-    cursor        → .cursor/rules/codagent.mdc
-    copilot       → .github/copilot-instructions.md
-    agents-md     → AGENTS.md
+For ``serve`` the target is ``module:attribute`` where attribute is an
+async-generator callable ``async def fn(body) -> yields str``.
 """
 
 from __future__ import annotations
@@ -58,10 +52,21 @@ def main(argv: list[str] | None = None) -> int:
     install.add_argument("--project", default=".", help="project root (default: cwd)")
     install.add_argument("--mode", default="replace", choices=("replace", "append"))
 
+    serve = sub.add_parser("serve", help="run the agent-native HTTP server")
+    serve.add_argument(
+        "target",
+        metavar="MODULE:ATTR",
+        help="async-generator callable to serve, e.g. 'myagent:run'",
+    )
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8000)
+
     args = parser.parse_args(argv)
 
     if args.cmd == "install":
         return _do_install(args)
+    if args.cmd == "serve":
+        return _do_serve(args)
     return 2
 
 
@@ -84,6 +89,34 @@ def _do_install(args) -> int:
         print(f"    ✓ {target_name} → {target._full_path()}")
 
     print("done.")
+    return 0
+
+
+def _do_serve(args) -> int:
+    import importlib
+
+    try:
+        import uvicorn
+    except ImportError:
+        print(
+            "codagent serve requires the 'server' extra. "
+            "Install with: pip install 'codagent[server]'",
+            file=sys.stderr,
+        )
+        return 1
+
+    if ":" not in args.target:
+        print("target must be MODULE:ATTR (e.g. myagent:run)", file=sys.stderr)
+        return 2
+    module_name, attr = args.target.split(":", 1)
+    module = importlib.import_module(module_name)
+    llm_call = getattr(module, attr)
+
+    from codagent.server import create_app
+
+    app = create_app(llm_call=llm_call)
+    print(f"codagent serve — {args.target} on http://{args.host}:{args.port}")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0
 
 
