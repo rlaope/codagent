@@ -40,6 +40,7 @@ from codagent.server.runs import (
     RunEvent,
     RunRegistry,
 )
+from codagent.server.sessions import InMemorySessionStore, SessionStore
 
 
 def _format_sse(event: RunEvent) -> str:
@@ -52,6 +53,7 @@ def create_app(
     llm_call: LLMCall,
     registry: RunRegistry | None = None,
     contracts: list[Contract] | None = None,
+    session_store: SessionStore | None = None,
 ) -> Starlette:
     """Build a Starlette app exposing the run-as-resource API.
 
@@ -60,6 +62,12 @@ def create_app(
     every naturally-completing run is validated against the harness.
     Failures emit a ``run.contract_failed`` event with the per-contract
     violations.
+
+    When a ``session_id`` is supplied in the POST /v1/runs body, the
+    created run is recorded under that session so reconnecting clients
+    can list and resume it via ``GET /v1/sessions/{session_id}/runs``.
+    The default :class:`InMemorySessionStore` keeps sessions in process
+    memory.
     """
 
     if registry is not None:
@@ -67,6 +75,7 @@ def create_app(
     else:
         harness = Harness(list(contracts)) if contracts else None
         reg = InMemoryRunRegistry(harness=harness)
+    sessions: SessionStore = session_store if session_store is not None else InMemorySessionStore()
 
     async def create_run(request: Request) -> Response:
         try:
@@ -75,7 +84,10 @@ def create_app(
             return JSONResponse({"error": "body must be JSON"}, status_code=400)
         if not isinstance(body, dict):
             return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+        session_id = body.pop("session_id", None) if isinstance(body.get("session_id"), str) else None
         run = reg.create_run(llm_call, body)
+        if session_id is not None:
+            sessions.attach_run(session_id, run.id)
         return JSONResponse(
             {"run_id": run.id, "status": run.status},
             status_code=201,
@@ -125,6 +137,18 @@ def create_app(
             headers={"cache-control": "no-cache", "x-accel-buffering": "no"},
         )
 
+    async def create_session(_: Request) -> Response:
+        session_id = sessions.create_session()
+        return JSONResponse({"session_id": session_id}, status_code=201)
+
+    async def list_session_runs(request: Request) -> Response:
+        session_id = request.path_params["id"]
+        if sessions.get_session(session_id) is None:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        return JSONResponse(
+            {"session_id": session_id, "runs": sessions.list_runs(session_id)}
+        )
+
     async def healthz(_: Request) -> JSONResponse:
         return JSONResponse({"ok": True})
 
@@ -134,6 +158,8 @@ def create_app(
             Route("/v1/runs/{id}", get_run, methods=["GET"]),
             Route("/v1/runs/{id}/cancel", cancel_run, methods=["POST"]),
             Route("/v1/runs/{id}/events", stream_events, methods=["GET"]),
+            Route("/v1/sessions", create_session, methods=["POST"]),
+            Route("/v1/sessions/{id}/runs", list_session_runs, methods=["GET"]),
             Route("/healthz", healthz, methods=["GET"]),
         ]
     )
