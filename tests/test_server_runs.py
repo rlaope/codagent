@@ -8,6 +8,8 @@ import pytest
 
 pytest.importorskip("starlette")
 
+from starlette.testclient import TestClient
+
 from codagent.server import create_app
 from codagent.server.runs import AgentRun, InMemoryRunRegistry, run_task
 
@@ -154,7 +156,6 @@ def _short_run_app():
 
 
 def test_http_full_run_lifecycle_via_events_endpoint():
-    from starlette.testclient import TestClient
 
     client = TestClient(_short_run_app())
     resp = client.post("/v1/runs", json={"prompt": "one two three"})
@@ -172,7 +173,6 @@ def test_http_full_run_lifecycle_via_events_endpoint():
 
 
 def test_http_get_run_snapshot_evolves():
-    from starlette.testclient import TestClient
 
     client = TestClient(_short_run_app())
     resp = client.post("/v1/runs", json={"prompt": "a b"})
@@ -189,7 +189,6 @@ def test_http_get_run_snapshot_evolves():
 
 
 def test_http_last_event_id_replay_skips_seen_events():
-    from starlette.testclient import TestClient
 
     client = TestClient(_short_run_app())
     resp = client.post("/v1/runs", json={"prompt": "alpha beta gamma delta"})
@@ -215,7 +214,6 @@ def test_http_last_event_id_replay_skips_seen_events():
 
 
 def test_http_cancel_endpoint_terminates_run_with_cancelled_event():
-    from starlette.testclient import TestClient
 
     upstream_cleanup: list[bool] = []
 
@@ -249,7 +247,6 @@ def test_http_cancel_endpoint_terminates_run_with_cancelled_event():
 
 
 def test_http_cancel_unknown_run_returns_404():
-    from starlette.testclient import TestClient
 
     client = TestClient(_short_run_app())
     assert client.post("/v1/runs/missing/cancel").status_code == 404

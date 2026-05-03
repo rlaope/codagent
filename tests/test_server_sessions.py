@@ -8,6 +8,8 @@ import pytest
 
 pytest.importorskip("starlette")
 
+from starlette.testclient import TestClient
+
 from codagent.server import create_app
 from codagent.server.sessions import InMemorySessionStore
 
@@ -42,7 +44,6 @@ async def _two_token_fake(_body):
 
 
 def test_post_sessions_returns_session_id():
-    from starlette.testclient import TestClient
 
     with TestClient(create_app(llm_call=_two_token_fake)) as client:
         resp = client.post("/v1/sessions")
@@ -53,7 +54,6 @@ def test_post_sessions_returns_session_id():
 
 
 def test_run_with_session_id_appears_in_list_runs():
-    from starlette.testclient import TestClient
 
     with TestClient(create_app(llm_call=_two_token_fake)) as client:
         sid = client.post("/v1/sessions").json()["session_id"]
@@ -71,7 +71,6 @@ def test_run_with_session_id_appears_in_list_runs():
 
 
 def test_run_without_session_id_is_not_tracked():
-    from starlette.testclient import TestClient
 
     with TestClient(create_app(llm_call=_two_token_fake)) as client:
         sid = client.post("/v1/sessions").json()["session_id"]
@@ -83,7 +82,6 @@ def test_run_without_session_id_is_not_tracked():
 
 
 def test_list_runs_for_unknown_session_is_404():
-    from starlette.testclient import TestClient
 
     with TestClient(create_app(llm_call=_two_token_fake)) as client:
         resp = client.get("/v1/sessions/does-not-exist/runs")
@@ -95,7 +93,6 @@ def test_reconnect_after_post_caller_gone_replays_full_event_sequence():
     attaches AFTER the POST has returned (and after the run has even
     completed) must still be able to read the full event sequence —
     that is the property a reconnecting client depends on."""
-    from starlette.testclient import TestClient
 
     async def fake(body):
         for tok in body.get("prompt", "x").split():
@@ -132,7 +129,6 @@ def test_reconnect_after_post_caller_gone_replays_full_event_sequence():
 def test_session_id_is_not_passed_through_to_llm_call_body():
     """session_id is server metadata; it must not leak into the LLM
     call's body."""
-    from starlette.testclient import TestClient
 
     seen_bodies: list[dict] = []
 
@@ -154,7 +150,6 @@ def test_session_id_is_not_passed_through_to_llm_call_body():
 
 def test_create_app_accepts_custom_session_store():
     """Custom SessionStore implementations are honoured."""
-    from starlette.testclient import TestClient
 
     class _CountingStore(InMemorySessionStore):
         def __init__(self):

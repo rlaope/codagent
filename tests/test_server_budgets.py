@@ -8,6 +8,8 @@ import pytest
 
 pytest.importorskip("starlette")
 
+from starlette.testclient import TestClient
+
 from codagent.server import create_app
 from codagent.server.budgets import BudgetConfig, BudgetGate
 from codagent.server.runs import InMemoryRunRegistry
@@ -69,7 +71,6 @@ async def _ten_tokens(_body):
 
 
 def test_identify_hook_is_called_with_the_request():
-    from starlette.testclient import TestClient
 
     seen: list[str] = []
 
@@ -88,7 +89,6 @@ def test_identify_hook_is_called_with_the_request():
 
 
 def test_default_identify_reads_x_codagent_user_header():
-    from starlette.testclient import TestClient
 
     captured_users: list[str] = []
 
@@ -107,7 +107,6 @@ def test_default_identify_reads_x_codagent_user_header():
 
 
 def test_run_terminates_with_budget_exceeded_when_token_ceiling_hit():
-    from starlette.testclient import TestClient
 
     app = create_app(
         llm_call=_ten_tokens,
@@ -129,7 +128,6 @@ def test_run_terminates_with_budget_exceeded_when_token_ceiling_hit():
 
 
 def test_second_request_blocked_immediately_when_already_over_budget():
-    from starlette.testclient import TestClient
 
     app = create_app(
         llm_call=_ten_tokens,
@@ -158,7 +156,6 @@ def test_second_request_blocked_immediately_when_already_over_budget():
 
 
 def test_no_budget_gate_when_budget_is_none():
-    from starlette.testclient import TestClient
 
     app = create_app(llm_call=_ten_tokens)  # budget omitted
     with TestClient(app) as client:
@@ -175,7 +172,6 @@ def test_no_budget_gate_when_budget_is_none():
 
 
 def test_budget_isolated_per_user():
-    from starlette.testclient import TestClient
 
     app = create_app(
         llm_call=_ten_tokens,

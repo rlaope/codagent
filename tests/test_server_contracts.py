@@ -8,7 +8,10 @@ import pytest
 
 pytest.importorskip("starlette")
 
+from starlette.testclient import TestClient
+
 from codagent.harness._abc import Contract
+from codagent.harness._harness import Harness
 from codagent.server import create_app
 from codagent.server.runs import InMemoryRunRegistry
 
@@ -46,11 +49,7 @@ def test_addendum_reaches_body_when_contracts_present():
     contract = _FakeContract("c1", "ALWAYS BE CAREFUL", ok=True)
 
     async def go():
-        registry = InMemoryRunRegistry(
-            harness=__import__(
-                "codagent.harness._harness", fromlist=["Harness"]
-            ).Harness([contract])
-        )
+        registry = InMemoryRunRegistry(harness=Harness([contract]))
         run = registry.create_run(capture, {"prompt": "hi"})
         await run._task  # type: ignore[arg-type]
 
@@ -87,8 +86,6 @@ def test_failing_contract_emits_run_contract_failed_with_names():
     failing = _FakeContract("missing-citation", "Cite sources.", ok=False, reason="no citation")
     passing = _FakeContract("polite", "Be polite.", ok=True)
 
-    from codagent.harness._harness import Harness
-
     async def go():
         registry = InMemoryRunRegistry(harness=Harness([failing, passing]))
         run = registry.create_run(fake, {})
@@ -109,8 +106,6 @@ def test_passing_contracts_emit_run_done_not_contract_failed():
     async def fake(_body):
         for tok in ["fine", " response"]:
             yield tok
-
-    from codagent.harness._harness import Harness
 
     contract = _FakeContract("polite", "Be polite.", ok=True)
 
@@ -150,8 +145,6 @@ def test_no_contract_validation_when_run_was_cancelled():
         finally:
             pass
 
-    from codagent.harness._harness import Harness
-
     async def go():
         registry = InMemoryRunRegistry(harness=Harness([_SpyContract()]))
         run = registry.create_run(slow, {})
@@ -177,7 +170,6 @@ def test_no_contract_validation_when_run_was_cancelled():
 
 
 def test_http_create_app_accepts_contracts_kwarg_and_addendum_threads_through():
-    from starlette.testclient import TestClient
 
     seen_bodies: list[dict] = []
 
@@ -200,7 +192,6 @@ def test_http_create_app_accepts_contracts_kwarg_and_addendum_threads_through():
 
 
 def test_http_failing_contract_via_app_emits_contract_failed_event():
-    from starlette.testclient import TestClient
 
     async def fake(_body):
         for tok in ["bad", " content"]:
@@ -222,15 +213,14 @@ def test_http_failing_contract_via_app_emits_contract_failed_event():
     assert "leaked PII" in body
     assert "event: run.done" not in body
 
-    snap = client.get(f"/v1/runs/{run_id}").json() if False else None  # snap ineligible after exit
-    # Verify status via fresh client (registry persists in app)
+    # The registry persists across TestClient context exits, so we can
+    # query the run snapshot from a fresh client to confirm status.
     with TestClient(app) as client2:
         snap = client2.get(f"/v1/runs/{run_id}").json()
     assert snap["status"] == "failed"
 
 
 def test_http_no_contract_validation_when_cancelled():
-    from starlette.testclient import TestClient
 
     async def slow(_body):
         try:

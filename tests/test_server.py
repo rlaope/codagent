@@ -11,6 +11,8 @@ import pytest
 
 pytest.importorskip("starlette")
 
+from starlette.testclient import TestClient
+
 from codagent.server import create_app
 
 
@@ -20,7 +22,6 @@ async def _yield_two(_body):
 
 
 def test_post_runs_returns_run_id_and_queued_status():
-    from starlette.testclient import TestClient
 
     client = TestClient(create_app(llm_call=_yield_two))
     resp = client.post("/v1/runs", json={"prompt": "x"})
@@ -31,7 +32,6 @@ def test_post_runs_returns_run_id_and_queued_status():
 
 
 def test_post_runs_rejects_non_json():
-    from starlette.testclient import TestClient
 
     client = TestClient(create_app(llm_call=_yield_two))
     resp = client.post(
@@ -43,7 +43,6 @@ def test_post_runs_rejects_non_json():
 
 
 def test_post_runs_rejects_non_object_json():
-    from starlette.testclient import TestClient
 
     client = TestClient(create_app(llm_call=_yield_two))
     resp = client.post("/v1/runs", json=[1, 2, 3])
@@ -51,7 +50,6 @@ def test_post_runs_rejects_non_object_json():
 
 
 def test_get_run_returns_404_for_unknown():
-    from starlette.testclient import TestClient
 
     client = TestClient(create_app(llm_call=_yield_two))
     resp = client.get("/v1/runs/does-not-exist")
@@ -59,7 +57,6 @@ def test_get_run_returns_404_for_unknown():
 
 
 def test_healthz():
-    from starlette.testclient import TestClient
 
     client = TestClient(create_app(llm_call=_yield_two))
     resp = client.get("/healthz")
