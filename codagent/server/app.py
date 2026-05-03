@@ -31,8 +31,11 @@ except ImportError as exc:  # pragma: no cover - import-time guard
         "pip install 'codagent[server]'"
     ) from exc
 
+from typing import Callable
+
 from codagent.harness._abc import Contract
 from codagent.harness._harness import Harness
+from codagent.server.budgets import BudgetConfig, BudgetGate
 from codagent.server.runs import (
     AgentRun,
     InMemoryRunRegistry,
@@ -48,34 +51,43 @@ def _format_sse(event: RunEvent) -> str:
     return f"id: {event.id}\nevent: {event.name}\ndata: {payload}\n\n"
 
 
+def _default_identify(request: "Request") -> str:
+    return request.headers.get("x-codagent-user", "anonymous")
+
+
 def create_app(
     *,
     llm_call: LLMCall,
     registry: RunRegistry | None = None,
     contracts: list[Contract] | None = None,
     session_store: SessionStore | None = None,
+    budget: BudgetConfig | None = None,
+    identify: Callable[["Request"], str] | None = None,
 ) -> Starlette:
     """Build a Starlette app exposing the run-as-resource API.
 
-    When ``contracts`` are provided, the harness ``system_addendum()`` is
-    exposed to the LLM callable via ``body["_codagent_addendum"]`` and
-    every naturally-completing run is validated against the harness.
-    Failures emit a ``run.contract_failed`` event with the per-contract
-    violations.
+    Optional features:
 
-    When a ``session_id`` is supplied in the POST /v1/runs body, the
-    created run is recorded under that session so reconnecting clients
-    can list and resume it via ``GET /v1/sessions/{session_id}/runs``.
-    The default :class:`InMemorySessionStore` keeps sessions in process
-    memory.
+    - ``contracts`` — runtime harness validation at run boundary; failures
+      emit ``run.contract_failed``.
+    - ``session_store`` — server-side session/run grouping.
+    - ``budget`` — per-user budget enforcement (a :class:`BudgetGate` is
+      built around it). Runs that trip a limit emit
+      ``run.budget_exceeded`` and terminate. State persists across runs
+      for the lifetime of the app.
+    - ``identify`` — Callable[[Request], str] mapping each request to a
+      user id. Default: read the ``x-codagent-user`` header, fall back
+      to ``"anonymous"``.
     """
 
+    budget_gate: BudgetGate | None = BudgetGate(budget) if budget is not None else None
     if registry is not None:
         reg: RunRegistry = registry
     else:
         harness = Harness(list(contracts)) if contracts else None
-        reg = InMemoryRunRegistry(harness=harness)
+        reg = InMemoryRunRegistry(harness=harness, budget_gate=budget_gate)
     sessions: SessionStore = session_store if session_store is not None else InMemorySessionStore()
+    identify_fn: Callable[["Request"], str] = identify if identify is not None else _default_identify
 
     async def create_run(request: Request) -> Response:
         try:
@@ -85,7 +97,8 @@ def create_app(
         if not isinstance(body, dict):
             return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
         session_id = body.pop("session_id", None) if isinstance(body.get("session_id"), str) else None
-        run = reg.create_run(llm_call, body)
+        user_id = identify_fn(request)
+        run = reg.create_run(llm_call, body, user_id=user_id)
         if session_id is not None:
             sessions.attach_run(session_id, run.id)
         return JSONResponse(

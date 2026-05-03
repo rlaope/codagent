@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, AsyncGenerator, AsyncIterator, Callable, Proto
 
 if TYPE_CHECKING:
     from codagent.harness._harness import Harness
+    from codagent.server.budgets import BudgetGate
 
 
 LLMCall = Callable[[dict], AsyncIterator[str]]
@@ -157,47 +158,64 @@ async def run_task(
     llm_call: LLMCall,
     body: dict,
     harness: "Harness | None" = None,
+    budget_gate: "BudgetGate | None" = None,
+    user_id: str = "",
 ) -> None:
     """Background task body: drive an :data:`LLMCall` and publish events.
 
-    Always publishes exactly one terminal event (``run.done``,
-    ``run.cancelled``, ``run.failed`` or ``run.contract_failed``) and
-    calls :meth:`AgentRun.mark_done` so subscribers exit cleanly.
+    Terminal events (exactly one is emitted):
+        * ``run.done`` — natural completion, contracts pass.
+        * ``run.contract_failed`` — natural completion but contracts fail.
+        * ``run.budget_exceeded`` — user budget tripped (pre-emptively or
+          mid-stream).
+        * ``run.cancelled`` — explicit or hard cancel.
+        * ``run.failed`` — upstream exception.
+
     Cooperative cancellation: callers set ``run.cancel_requested`` and
     the runner exits between tokens so the upstream async generator's
     ``finally`` block runs naturally.
-
-    When ``harness`` is provided, contracts run on the concatenated
-    token output **only** if the run completed naturally (not on cancel
-    or upstream exception). Failure emits ``run.contract_failed`` with
-    a list of violations; success emits ``run.done`` as usual.
     """
     failed: str | None = None
     accumulated: list[str] = []
+    budget_violation: dict | None = None
     try:
         run.status = "running"
         await run.publish("run.started", {"run_id": run.id})
 
-        agen = llm_call(body)
-        try:
-            async for token in agen:
-                if run.cancel_requested:
-                    break
-                accumulated.append(token)
-                await run.publish("token", {"text": token})
-        finally:
-            aclose = getattr(agen, "aclose", None)
-            if aclose is not None:
-                try:
-                    await aclose()
-                except BaseException:
-                    pass
+        # Pre-emptive budget check: a user already over the ceiling is
+        # rejected without even starting the upstream call.
+        if budget_gate is not None:
+            violation = budget_gate.check(user_id)
+            if violation is not None:
+                budget_violation = violation
+                run._cancel_requested = True
+
+        if not run.cancel_requested:
+            agen = llm_call(body)
+            try:
+                async for token in agen:
+                    if run.cancel_requested:
+                        break
+                    accumulated.append(token)
+                    if budget_gate is not None:
+                        budget_gate.record_token(user_id, "output", 1)
+                        violation = budget_gate.check(user_id)
+                        if violation is not None:
+                            budget_violation = violation
+                            run._cancel_requested = True
+                            break
+                    await run.publish("token", {"text": token})
+            finally:
+                aclose = getattr(agen, "aclose", None)
+                if aclose is not None:
+                    try:
+                        await aclose()
+                    except BaseException:
+                        pass
 
     except asyncio.CancelledError:
         # External hard-cancel: treat as a cooperative cancel for cleanup.
         run._cancel_requested = True
-        # Reset the cancel state on the current task so subsequent awaits
-        # (publishing the terminal event, mark_done) can proceed.
         current = asyncio.current_task()
         if current is not None:
             uncancel = getattr(current, "uncancel", None)
@@ -209,6 +227,12 @@ async def run_task(
     if failed is not None:
         run.status = "failed"
         await run.publish("run.failed", {"run_id": run.id, "error": failed})
+    elif budget_violation is not None:
+        run.status = "failed"
+        await run.publish(
+            "run.budget_exceeded",
+            {"run_id": run.id, **budget_violation},
+        )
     elif run.cancel_requested:
         run.status = "cancelled"
         await run.publish("run.cancelled", {"run_id": run.id})
@@ -248,7 +272,9 @@ class RunRegistry(Protocol):
     without modifying the app.
     """
 
-    def create_run(self, llm_call: LLMCall, body: dict) -> AgentRun: ...
+    def create_run(
+        self, llm_call: LLMCall, body: dict, *, user_id: str = ""
+    ) -> AgentRun: ...
 
     def get(self, run_id: str) -> AgentRun | None: ...
 
@@ -257,23 +283,36 @@ class InMemoryRunRegistry:
     """Process-local run registry.
 
     Accepts an optional :class:`Harness` whose contracts are validated
-    against the run's accumulated output on natural completion. The
-    harness's ``system_addendum()`` is exposed to ``llm_call`` via
-    ``body["_codagent_addendum"]`` so the run code can prepend it to
-    its prompt.
+    against the run's accumulated output on natural completion (the
+    addendum is exposed to ``llm_call`` via ``body["_codagent_addendum"]``)
+    and an optional :class:`BudgetGate` for per-user limit enforcement.
     """
 
-    def __init__(self, harness: "Harness | None" = None) -> None:
+    def __init__(
+        self,
+        harness: "Harness | None" = None,
+        budget_gate: "BudgetGate | None" = None,
+    ) -> None:
         self._runs: dict[str, AgentRun] = {}
         self._harness = harness
+        self._budget_gate = budget_gate
 
-    def create_run(self, llm_call: LLMCall, body: dict) -> AgentRun:
+    def create_run(
+        self, llm_call: LLMCall, body: dict, *, user_id: str = ""
+    ) -> AgentRun:
         if self._harness is not None and self._harness.contracts:
             body = dict(body)
             body["_codagent_addendum"] = self._harness.system_addendum()
         run = AgentRun(id=str(uuid.uuid4()))
         run._task = asyncio.create_task(
-            run_task(run, llm_call, body, harness=self._harness)
+            run_task(
+                run,
+                llm_call,
+                body,
+                harness=self._harness,
+                budget_gate=self._budget_gate,
+                user_id=user_id,
+            )
         )
         self._runs[run.id] = run
         return run
